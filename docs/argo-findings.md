@@ -1,5 +1,9 @@
 # CWL → Argo: findings
 
+> The translator described here has been removed. hydrowf-core's Argo adapter
+> (`hydrowf_core.adapters.argo`) replaced it and keeps these lessons: `command` set for
+> Argo's emissary executor, exact output paths, `HOME` set through the tool lego's `env`.
+
 From translating and running both hydrowf-tools pipelines on kind + Argo Workflows v4.1.6 +
 RustFS (2026-11-11), gage-01031510, 2017-10 to 2019-09.
 
