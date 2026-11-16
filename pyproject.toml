@@ -4,11 +4,17 @@ version = "0.1.0"
 description = "hydrowf backend: OGC API - Processes plugins, publishing"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.11"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+  "hydrowf-core[argo]",
+  "pygeoapi>=0.24,<0.25",
+]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "flake8>=7"]
+
+[tool.uv.sources]
+hydrowf-core = { git = "https://github.com/Aquaveo/hydrowf-core", rev = "18a19b0" }
 
 [build-system]
 requires = ["hatchling"]
