@@ -1,0 +1,250 @@
+# Registry entries from different domains; none needs platform code.
+
+- kind: data
+  id: nwm-retrospective-3.0-forcing
+  version: 1.0.0
+  title: NWM 3.0 retrospective forcings (AWS open data)
+  data_kind: external
+  visibility: public
+  storage:
+    driver: external
+    url: s3://noaa-nwm-retrospective-3-0-pds/CONUS/zarr/forcing/
+    format: zarr
+
+- kind: data
+  id: hydrofabric-v2.2
+  version: 1.0.0
+  title: Hydrofabric v2.2 (icefabric schemas)
+  data_kind: managed
+  visibility: public
+  storage:
+    driver: iceberg
+    tables:
+      network:
+        columns: {ref: icefabric.hydrofabric_v2.2.Network}
+        partition: [{transform: identity, column: vpuid}]
+        sort: [id]
+
+- kind: data
+  id: teehr.secondary-timeseries
+  version: 1.0.0
+  title: Model time series (TEEHR schema)
+  data_kind: output
+  storage:
+    driver: iceberg
+    tables:
+      secondary_timeseries:
+        columns:
+          - {name: location_id, type: string, required: true}
+          - {name: value_time, type: timestamp, required: true}
+          - {name: value, type: float}
+          - {name: configuration_name, type: string, required: true}
+        partition:
+          - {transform: month, column: value_time}
+          - {transform: identity, column: configuration_name}
+        sort: [location_id, value_time]
+
+- kind: data
+  id: fim.depth-grids
+  version: 1.0.0
+  title: Flood depth grids
+  data_kind: output
+  storage:
+    driver: stac
+    format: cog
+    extensions: [raster, projection]
+    properties: {datetime: run.end, "proj:epsg": manifest.crs}
+
+- kind: tool
+  id: hydrofabric-subset
+  version: 0.1.0
+  title: Hydrofabric subset (upstream of a gage)
+  image: ghcr.io/example/hydrofabric-subset:0.1.0
+  command: [hydrofabric-subset]
+  args: [--id, "{outlet}", --out, "{workdir}/region.gpkg"]
+  inputs:
+    - {name: hydrofabric, type: dataset, data: hydrofabric-v2.2}
+    - {name: outlet, type: string, description: "gage-… or cat-…"}
+  outputs:
+    - {name: region, type: file, data: hydrofabric-gpkg, path: region.gpkg}
+  runs_on: [argo]
+
+- kind: data
+  id: hydrofabric-gpkg
+  version: 1.0.0
+  title: Hydrofabric as a GeoPackage (ngen layout)
+  data_kind: output
+  storage: {driver: stac, format: other}
+
+- kind: data
+  id: hydrofabric-graph
+  version: 1.0.0
+  title: Hydrofabric network graph (igraph pickle)
+  data_kind: output
+  storage: {driver: stac, format: other}
+
+- kind: data
+  id: ngen-run
+  version: 1.0.0
+  title: NGIAB run folder
+  data_kind: output
+  storage: {driver: stac, format: other}
+
+# From hydrowf-tools nextgen/ngiab-preprocess/ngiab-preprocess.cwl (the spec it was copied from).
+- kind: tool
+  id: ngiab-preprocess
+  version: 4.9.5
+  title: NGIAB data preprocess
+  image: hydrowf/ngiab-preprocess:4.9.5.dev2-02c4145
+  command: [cli]
+  # The preprocessor reads the hydrofabric from ~/.ngiab/hydrofabric/v2.2/, so HOME is the workdir.
+  env: {HOME: "{workdir}"}
+  files: {.ngiab/hydrofabric/v2.2/no_update: ""}       # stops validate_hydrofabric() from prompting
+  network: true                                         # forcings come from public S3 buckets
+  args:
+    - --output_root
+    - "{workdir}"
+    - -o
+    - "{workdir}/{run_name}"
+    - -s
+    - -f
+    - -r
+    - -i
+    - "{feature}"
+    - --start_date
+    - "{start_date}"
+    - --end_date
+    - "{end_date}"
+    - {when: model, args: ["--{model}"]}
+    - --source
+    - "{source}"
+    - --subset_type
+    - "{subset_type}"
+    - {when: nwm_gw, args: [--nwm_gw]}
+    - --precip_max_gap
+    - "{precip_max_gap}"
+  inputs:
+    - {name: feature, type: string, description: "cat-5173 or gage-01646500"}
+    - {name: start_date, type: string}
+    - {name: end_date, type: string}
+    - {name: model, type: enum, symbols: [lstm, lstm_rust, dhbv2, dhbv2_daily, summa, snow17, sacsma],
+       optional: true, description: "empty = CFE + NOAH-OWP"}
+    - {name: source, type: enum, symbols: [nwm, aorc], default: nwm}
+    - {name: subset_type, type: enum, symbols: [nexus, catchment], default: nexus}
+    - {name: nwm_gw, type: boolean, default: false}
+    - {name: precip_max_gap, type: int, default: 6}
+    - {name: run_name, type: string, default: ngen-run}
+    - {name: hydrofabric, type: file, data: hydrofabric-gpkg,
+       path: .ngiab/hydrofabric/v2.2/conus_nextgen.gpkg}
+    - {name: hydrofabric_graph, type: file, data: hydrofabric-graph, optional: true,
+       path: .ngiab/hydrofabric/v2.2/conus_igraph_network.gpickle}
+  outputs:
+    - {name: ngen_run, type: directory, data: ngen-run, path: "{run_name}"}
+  cpu: 4
+  ram_mb: 16384
+
+# From hydrowf-tools nextgen/ngiab-run/ngiab-run.cwl. No command: the image's ENTRYPOINT
+# (/ngen/HelloNGEN.sh) takes <run dir> auto <procs> local.
+- kind: tool
+  id: ngiab-run
+  version: 2.1.0
+  title: NextGen run (NGIAB)
+  image: awiciroh/ciroh-ngen-image@sha256:d5ee1a6c15c025f9be2f9ce140dd9cdc2e933bc30f531a41f180d45b15c8ab17
+  args: ["{ngen_run}", auto, "{cpu}", local]
+  inputs:
+    - {name: ngen_run, type: directory, data: ngen-run, path: ngen-run}
+  outputs:
+    - {name: ngen_run, type: directory, data: ngen-run, path: ngen-run}   # same folder, outputs/ filled in
+  cpu: 4
+  ram_mb: 2048
+
+- kind: data
+  id: ngen-cng
+  version: 1.0.0
+  title: NGIAB run as cloud-native files (Parquet, Zarr, COG, manifest.json)
+  data_kind: output
+  storage: {driver: stac, format: other}
+
+# From hydrowf-tools nextgen/ngiab-to-cng/ngiab-to-cng.cwl. The image is only built locally, so
+# `command` repeats its ENTRYPOINT: Argo's emissary asks the registry otherwise, and a registry
+# can't describe a local image (hydrowf-platform docs/argo-findings.md).
+- kind: tool
+  id: ngiab-to-cng
+  version: 0.1.0
+  title: NGIAB run to cloud-native files
+  image: hydrowf/ngiab-to-cng:0.1.0
+  command: [python, /app/ngiab_to_cng.py]
+  args:
+    - "{ngen_run}"
+    - --output
+    - "{workdir}/ngen-run_cng"
+    - --run-id
+    - "{run}"                       # the platform's id for this run (Argo: the workflow name)
+    - --configuration-name
+    - "{configuration_name}"
+  inputs:
+    - {name: ngen_run, type: directory, data: ngen-run, path: ngen-run}
+    - {name: configuration_name, type: string, default: ngiab, description: TEEHR configuration name}
+  outputs:
+    - {name: cng, type: directory, data: ngen-cng, path: ngen-run_cng}
+  cpu: 1
+  ram_mb: 2048
+
+- kind: pipeline
+  id: ngiab-prepare
+  version: 0.1.0
+  title: Subset the hydrofabric, then preprocess
+  inputs:
+    - {name: outlet, type: string}
+    - {name: start, type: string}
+    - {name: end, type: string}
+  steps:
+    - name: subset
+      tool: {id: hydrofabric-subset, version: 0.1.0}
+      inputs:
+        hydrofabric: {data: {id: hydrofabric-v2.2, version: 1.0.0}}
+        outlet: {input: outlet}
+    - name: preprocess
+      tool: {id: ngiab-preprocess, version: 4.9.5}
+      inputs:
+        hydrofabric: {step: subset, output: region}
+        feature: {input: outlet}
+        start_date: {input: start}
+        end_date: {input: end}
+        source: {value: nwm}
+  outputs:
+    run: {step: preprocess, output: ngen_run}
+
+- kind: pipeline
+  id: ngiab-simulation
+  version: 0.1.0
+  title: Preprocess, run NextGen, convert to cloud-native files
+  inputs:
+    - {name: feature, type: string}
+    - {name: start_date, type: string}
+    - {name: end_date, type: string}
+    - {name: hydrofabric, type: file, data: hydrofabric-gpkg}
+    - {name: hydrofabric_graph, type: file, data: hydrofabric-graph, optional: true,
+       description: "without it, the preprocessor builds the graph from the gpkg"}
+    - {name: configuration_name, type: string, default: ngiab_cfe_default}
+  steps:
+    - name: preprocess
+      tool: {id: ngiab-preprocess, version: 4.9.5}
+      inputs:
+        hydrofabric: {input: hydrofabric}
+        hydrofabric_graph: {input: hydrofabric_graph}
+        feature: {input: feature}
+        start_date: {input: start_date}
+        end_date: {input: end_date}
+    - name: run
+      tool: {id: ngiab-run, version: 2.1.0}
+      inputs:
+        ngen_run: {step: preprocess, output: ngen_run}
+    - name: to-cng
+      tool: {id: ngiab-to-cng, version: 0.1.0}
+      inputs:
+        ngen_run: {step: run, output: ngen_run}
+        configuration_name: {input: configuration_name}
+  outputs:
+    run: {step: run, output: ngen_run}
+    cng: {step: to-cng, output: cng}
