@@ -1,0 +1,33 @@
+# Tethys portal for tethys/Dockerfile: no apps, only the OGC API - Processes routes at /ogc.
+# tethys-uvx's portal-config.sh fills in SECRET_KEY and DATABASES from the environment and adds
+# PORTAL_ALLOWED_HOSTS to ALLOWED_HOSTS.
+version: 2.0
+name: hydrowf
+apps: {}
+settings:
+  DEBUG: false
+  ALLOWED_HOSTS:
+    - localhost
+    - 127.0.0.1
+  DATABASES:
+    default:
+      ENGINE: django.db.backends.postgresql   # TETHYS_DB_ENGINE replaces it
+      NAME: tethys_platform
+      USER: tethys_default
+      HOST: postgres
+      PORT: 5432
+      CONN_MAX_AGE: 0
+  CHANNEL_LAYERS:
+    default:
+      BACKEND: channels.layers.InMemoryChannelLayer
+  TETHYS_PORTAL_CONFIG:
+    ENABLE_OPEN_PORTAL: true
+    BYPASS_TETHYS_HOME_PAGE: true
+    ADDITIONAL_SETTINGS_FILES:
+      - hydrowf_platform.tethys.settings
+    ADDITIONAL_URLPATTERNS:
+      - hydrowf_platform.tethys.urls.urlpatterns
+site_settings:
+  GENERAL_SETTINGS:
+    SITE_TITLE: hydrowf
+    BRAND_TEXT: hydrowf

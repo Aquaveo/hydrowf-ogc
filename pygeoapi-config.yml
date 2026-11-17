@@ -8,7 +8,7 @@ server:
   bind:
     host: 127.0.0.1
     port: 5000
-  url: http://localhost:5000
+  url: ${PYGEOAPI_SERVER_URL:-http://localhost:5000}   # Tethys: http://<host>/ogc
   mimetype: application/json; charset=UTF-8
   encoding: utf-8
   languages: [en-US]
@@ -52,5 +52,5 @@ resources:
     type: process
     processor:
       name: hydrowf_platform.processor.PipelineProcessor
-      registry: registry/legos.yaml
+      registry: ${HYDROWF_REGISTRY:-registry/legos.yaml}   # relative to the working directory
       pipeline: {id: ngiab-simulation, version: 0.1.0}
