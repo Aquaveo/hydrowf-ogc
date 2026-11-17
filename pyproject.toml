@@ -11,7 +11,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "flake8>=7"]
+dev = [
+    "pytest>=8",
+    "flake8>=7",
+    "django>=4.2,<6",
+]
 
 [tool.uv.sources]
 hydrowf-core = { git = "https://github.com/Aquaveo/hydrowf-core", rev = "9e10e9f" }
