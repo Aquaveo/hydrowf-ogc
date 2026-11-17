@@ -1,0 +1,56 @@
+# pygeoapi on the local kind cluster (hydrowf-deploy/local): Argo at https://localhost:2746,
+# RustFS (S3) at http://localhost:9000. Development only: no auth, self-signed Argo certificate.
+#
+#   export PYGEOAPI_CONFIG=pygeoapi-config.yml PYGEOAPI_OPENAPI=pygeoapi-openapi.yml
+#   uv run --python 3.12 pygeoapi openapi generate $PYGEOAPI_CONFIG --output-file $PYGEOAPI_OPENAPI
+#   uv run --python 3.12 pygeoapi serve
+server:
+  bind:
+    host: 127.0.0.1
+    port: 5000
+  url: http://localhost:5000
+  mimetype: application/json; charset=UTF-8
+  encoding: utf-8
+  languages: [en-US]
+  limits:
+    default_items: 10
+    max_items: 100
+  map:
+    url: https://tile.openstreetmap.org/{z}/{x}/{y}.png
+    attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap contributors</a>'
+  manager:
+    name: hydrowf_platform.manager.ArgoManager
+    connection:
+      host: https://localhost:2746
+      namespace: argo
+      bucket: my-bucket
+      verify_ssl: false          # kind's argo-server has a self-signed certificate
+      entrypoints: {}
+    output_dir: /tmp             # required by pygeoapi's schema; ArgoManager doesn't use it
+
+logging:
+  level: INFO
+
+metadata:
+  identification:
+    title: hydrowf
+    description: hydrowf pipelines as OGC API - Processes, run on Argo Workflows
+    keywords: [hydrology, nextgen, workflows]
+    url: https://github.com/Aquaveo/hydrowf-platform
+    terms_of_service: https://creativecommons.org/licenses/by/4.0/   # optional in the schema, required by openapi generate
+  license:
+    name: CC-BY 4.0 license
+    url: https://creativecommons.org/licenses/by/4.0/                 # same
+  provider:
+    name: Aquaveo
+    url: https://aquaveo.com
+  contact:
+    name: hydrowf developers
+
+resources:
+  ngiab-simulation:
+    type: process
+    processor:
+      name: hydrowf_platform.processor.PipelineProcessor
+      registry: registry/legos.yaml
+      pipeline: {id: ngiab-simulation, version: 0.1.0}

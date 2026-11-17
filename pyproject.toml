@@ -14,7 +14,7 @@ dependencies = [
 dev = ["pytest>=8", "flake8>=7"]
 
 [tool.uv.sources]
-hydrowf-core = { git = "https://github.com/Aquaveo/hydrowf-core", rev = "18a19b0" }
+hydrowf-core = { git = "https://github.com/Aquaveo/hydrowf-core", rev = "9e10e9f" }
 
 [build-system]
 requires = ["hatchling"]

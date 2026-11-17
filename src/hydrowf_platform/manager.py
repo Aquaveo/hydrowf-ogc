@@ -11,12 +11,13 @@ pygeoapi config:
     server:
       manager:
         name: hydrowf_platform.manager.ArgoManager
-        argo:
+        connection:                                # pygeoapi's "where jobs are stored": Argo
           host: https://argo-server.argo:2746     # or HYDROWF_ARGO_HOST
           namespace: argo
           bucket: my-bucket                        # the artifact repository bucket
           verify_ssl: true
           entrypoints: {}                          # image -> ENTRYPOINT, for tools without `command`
+        output_dir: /tmp                           # required by pygeoapi's schema; unused
 
 The Argo token comes from HYDROWF_ARGO_TOKEN, never from the config file.
 """
@@ -107,7 +108,7 @@ class ArgoManager(BaseManager):
         super().__init__(manager_def)
         self.is_async = True
         self.supports_subscribing = False
-        argo = manager_def.get("argo", {})
+        argo = manager_def.get("connection") or {}
         self.entrypoints: dict[str, list[str]] = argo.get("entrypoints", {})
         self.runtime: Any = manager_def.get("runtime") or ArgoRuntime(   # `runtime`: tests pass a fake
             host=os.environ.get("HYDROWF_ARGO_HOST", argo.get("host", "")),
