@@ -221,3 +221,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Tethys portal secrets (tethys/README.md)
+tethys.env
