@@ -71,7 +71,7 @@ def manager(runtime=None):
         {
             "name": "hydrowf_platform.manager.ArgoManager",
             "runtime": runtime or FakeRuntime(),
-            "argo": {
+            "connection": {
                 "bucket": "my-bucket",
                 "entrypoints": {NGEN: ["/ngen/HelloNGEN.sh"]},
             },
