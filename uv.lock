@@ -479,7 +479,7 @@ wheels = [
 [[package]]
 name = "hydrowf-core"
 version = "0.1.0"
-source = { git = "https://github.com/Aquaveo/hydrowf-core?rev=b56f7b9#b56f7b9d8f5dd62dc63c942e59749136acf81560" }
+source = { git = "https://github.com/Aquaveo/hydrowf-core?rev=26d0e0a#26d0e0aa49e092616ea0c93f38b33bff67e4cfce" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -511,7 +511,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.44.5" },
-    { name = "hydrowf-core", extras = ["argo"], git = "https://github.com/Aquaveo/hydrowf-core?rev=b56f7b9" },
+    { name = "hydrowf-core", extras = ["argo"], git = "https://github.com/Aquaveo/hydrowf-core?rev=26d0e0a" },
     { name = "pygeoapi", specifier = ">=0.24,<0.25" },
 ]
 

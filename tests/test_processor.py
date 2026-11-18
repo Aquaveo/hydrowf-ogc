@@ -81,7 +81,7 @@ def test_shipped_calibration_inputs_follow_the_preprocessors_formats(name, value
     if ok:
         run()
     else:
-        with pytest.raises(BadInputs, match=f"input {name}: .* does not match"):
+        with pytest.raises(BadInputs, match=rf"input {name}\b.* does not match"):   # pipeline's or a tool's
             run()
 
 
@@ -91,3 +91,16 @@ def test_shipped_simulation_takes_every_feature_form_the_preprocessor_does(featu
     inputs = {**CALIBRATION_INPUTS, "feature": feature}
     del inputs["gage"]
     render(find_pipeline(legos, "ngiab-simulation", "0.1.0"), legos, inputs, lambda image: None)
+
+
+def test_shipped_descriptions_publish_the_tools_patterns():
+    legos = load_legos(SHIPPED)
+    simulation = process_description(find_pipeline(legos, "ngiab-simulation", "0.1.0"), legos)["inputs"]
+    assert simulation["start_date"]["schema"]["pattern"] == "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}( [0-9]{2}:[0-9]{2})?)$"
+    assert simulation["configuration_name"]["schema"]["pattern"] == "^(?:[A-Za-z0-9][A-Za-z0-9_-]*)$"
+    calibration = process_description(find_pipeline(legos, "ngiab-calibration", "0.1.0"), legos)["inputs"]
+    assert calibration["gage"]["schema"]["allOf"] == [         # its own, then preprocess.feature, calibrate.gage
+        {"pattern": "^(?:gage-[0-9A-Za-z]+)$"},
+        {"pattern": "^(?:(gage|cat|wb)-[0-9A-Za-z]+|[0-9]+)$"},
+        {"pattern": "^(?:(gage-)?[0-9A-Za-z]+)$"},
+    ]
