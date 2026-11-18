@@ -7,6 +7,7 @@ Importing the module here makes a broken one fail the build instead.
 import importlib
 import io
 import json
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 import django
 import jwt
 import pytest
+import yaml
 from cryptography.hazmat.primitives.asymmetric import rsa
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -195,7 +197,21 @@ def test_an_issuer_without_an_audience_fails_at_startup(urls, monkeypatch):
     importlib.reload(module)
 
 
-# ---- guard(): allowed methods, bearer token, open reads, CSRF-checked session writes
+def test_a_half_configured_downloads_section_fails_at_startup(urls, monkeypatch, tmp_path):
+    config = yaml.safe_load(Path(os.environ["PYGEOAPI_CONFIG"]).read_text())
+    config["server"]["manager"]["connection"]["downloads"] = {"endpoint": "http://localhost:9000"}
+    broken = tmp_path / "pygeoapi-config.yml"
+    broken.write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("PYGEOAPI_CONFIG", str(broken))
+    monkeypatch.delenv("HYDROWF_S3_ACCESS_KEY", raising=False)       # no keys: half configured
+    module = importlib.import_module("hydrowf_platform.tethys.settings")
+    with pytest.raises(ImproperlyConfigured, match="downloads"):
+        importlib.reload(module)
+    monkeypatch.undo()
+    importlib.reload(module)
+
+
+# ---- guard(): allowed methods, bearer token, opt-in open reads, CSRF-checked session writes
 
 
 def ok(request, *args, **kwargs):
@@ -215,6 +231,7 @@ CREDENTIALS = {          # credential -> (request headers, made when the test ru
     "bearer-tab": (lambda: {"HTTP_AUTHORIZATION": f" Bearer\t{token()}"}, False),         # any whitespace
     "bearer-empty+session": (lambda: {"HTTP_AUTHORIZATION": "Bearer "}, True),
     "basic": (lambda: {"HTTP_AUTHORIZATION": "Basic dXNlcjpwYXNz"}, False),  # not ours: the session decides
+    "basic+session": (lambda: {"HTTP_AUTHORIZATION": "Basic dXNlcjpwYXNz"}, True),
 }
 
 
@@ -231,10 +248,11 @@ def request_with(method, credential, secure=False, **extra):
     return request
 
 
-@pytest.mark.parametrize("method, credential, status", [
-    ("GET", None, 200),
-    ("OPTIONS", None, 200),
-    ("HEAD", None, 200),
+@pytest.mark.parametrize("method, credential, status", [       # a route without open_reads (the default)
+    ("GET", None, 401),                         # reads need a caller too: job results are download links
+    ("OPTIONS", None, 401),
+    ("HEAD", None, 401),
+    ("GET", "session", 200),                    # a session read needs no CSRF token
     ("POST", None, 401),
     ("DELETE", None, 401),
     ("PATCH", None, 401),                       # deny by default
@@ -251,7 +269,8 @@ def request_with(method, credential, secure=False, **extra):
     ("POST", "bearer-lowercase", 200),
     ("POST", "bearer-tab", 200),
     ("GET", "bearer-empty+session", 401),       # a malformed credential is refused too
-    ("GET", "basic", 200),
+    ("GET", "basic", 401),                      # not ours, and no session: anonymous
+    ("GET", "basic+session", 200),
     ("POST", "basic", 401),
 ])
 def test_guard(bearer, method, credential, status):
@@ -261,9 +280,30 @@ def test_guard(bearer, method, credential, status):
         assert "error" in json.loads(response.content)
 
 
-def urls_guard(methods):
+def urls_guard(methods, **options):
     from hydrowf_platform.tethys.urls import guard
-    return guard(ok, methods)
+    return guard(ok, methods, **options)
+
+
+@pytest.mark.parametrize("method, credential, status", [
+    ("GET", None, 200),
+    ("HEAD", None, 200),
+    ("OPTIONS", None, 200),
+    ("POST", None, 401),                        # open reads open nothing else
+    ("DELETE", None, 401),
+    ("GET", "bearer-expired", 401),             # and a bad token is still refused
+])
+def test_open_reads_open_only_the_reads(bearer, method, credential, status):
+    response = urls_guard(ALL, open_reads=True)(request_with(method, credential), job_id="job-1")
+    assert response.status_code == status
+
+
+@pytest.mark.parametrize("url", ["/ogc/jobs", "/ogc/jobs/job-1", "/ogc/jobs/job-1/results"])
+def test_jobs_are_not_open_to_anonymous_reads(urls, url):
+    request = RequestFactory().get(url)
+    request.user = SimpleNamespace(is_authenticated=False)
+    match = resolve(url)
+    assert match.func(request, **match.kwargs).status_code == 401
 
 
 @pytest.mark.parametrize("extra, status", [
