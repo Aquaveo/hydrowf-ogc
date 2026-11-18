@@ -54,3 +54,9 @@ resources:
       name: hydrowf_platform.processor.PipelineProcessor
       registry: ${HYDROWF_REGISTRY:-registry/legos.yaml}   # relative to the working directory
       pipeline: {id: ngiab-simulation, version: 0.1.0}
+  ngiab-calibration:
+    type: process
+    processor:
+      name: hydrowf_platform.processor.PipelineProcessor
+      registry: ${HYDROWF_REGISTRY:-registry/legos.yaml}
+      pipeline: {id: ngiab-calibration, version: 0.1.0}
