@@ -1,5 +1,6 @@
 """ArgoManager with a fake ArgoRuntime (no cluster), driven through pygeoapi's own execute_process."""
 
+import contextvars
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from pygeoapi.process.base import JobNotFoundError, JobResultNotFoundError
 from pygeoapi.util import JobStatus
 
 from hydrowf_core.adapters.argo_runtime import RunStatus
+from hydrowf_platform import caller
 from hydrowf_platform.downloads import Presigner
 from hydrowf_platform.manager import ArgoManager, BadExecuteRequest, job_dict
 
@@ -24,6 +26,8 @@ INPUTS = {
     "end_date": "2019-09-30",
     "hydrofabric": "s3://my-bucket/hydrofabric/v2.2/conus_nextgen.gpkg",
 }
+ME, SOMEONE = "8d3a6e2c-1f0b-4c4e-9a51-0e6d2b7c9f10", "5b1e0c7a-2d4f-4e8b-a3c6-9f0d1e2b3c4a"   # Keycloak subs
+MINE = {caller.OWNER_LABEL: ME}
 NGEN = "awiciroh/ciroh-ngen-image@sha256:d5ee1a6c15c025f9be2f9ce140dd9cdc2e933bc30f531a41f180d45b15c8ab17"
 
 
@@ -42,9 +46,8 @@ class FakeRuntime:
     def submit(self, workflow):
         self.submitted.append(workflow)
         name = workflow["metadata"]["name"]
-        self.runs[name] = RunStatus(
-            name, "Pending", pipeline=workflow["metadata"]["labels"]["hydrowf/pipeline"]
-        )
+        labels = workflow["metadata"]["labels"]
+        self.runs[name] = RunStatus(name, "Pending", pipeline=labels["hydrowf/pipeline"], labels=labels)
         return name
 
     def status(self, name):
@@ -52,9 +55,10 @@ class FakeRuntime:
             raise NotFound(name)
         return self.runs[name]
 
-    def list(self, pipeline=None):
+    def list(self, pipeline=None, labels=None):
+        wanted = (labels or {}).items()
         return sorted(
-            self.runs.values(),
+            (run for run in self.runs.values() if wanted <= run.labels.items()),
             key=lambda r: (r.created_at is not None, r.created_at),
             reverse=True,
         )
@@ -94,6 +98,7 @@ DONE = RunStatus(
     started_at=utc(2026, 11, 15, 0, 29, 58),
     finished_at=utc(2026, 11, 15, 0, 40, 15),
     progress="2/2",
+    labels=MINE,
 )
 RUNNING = RunStatus(
     "job-running",
@@ -104,13 +109,26 @@ RUNNING = RunStatus(
     created_at=utc(2026, 11, 16, 9, 0, 0),
     started_at=utc(2026, 11, 16, 9, 0, 1),
     progress="1/3",
+    labels=MINE,
 )
 QUEUED = RunStatus(
     "job-queued",
     "Pending",
     pipeline="ngiab-simulation",
     created_at=utc(2026, 11, 16, 10, 0, 0),
+    labels=MINE,
 )
+THEIRS = RunStatus("job-theirs", "Succeeded", pipeline="ngiab-simulation", created_at=utc(2026, 11, 16, 11),
+                   labels={caller.OWNER_LABEL: SOMEONE})
+NOBODYS = RunStatus("job-nobodys", "Succeeded", pipeline="ngiab-simulation",   # submitted before owners existed
+                    created_at=utc(2026, 11, 16, 12))
+
+
+@pytest.fixture(autouse=True)
+def as_me():
+    """Every test runs as ME, the way guard() runs a request with a verified token."""
+    with caller.acting_as(ME):
+        yield
 
 
 # ---- job_dict: one run -> the job record pygeoapi reads
@@ -181,6 +199,7 @@ def test_execute_submits_the_rendered_pipeline_named_after_the_job():
         and "generateName" not in workflow["metadata"]
     )
     assert m.get_job(job_id)["status"] == "accepted"
+    assert workflow["metadata"]["labels"][caller.OWNER_LABEL] == ME          # the run is the caller's
 
 
 def test_execute_with_bad_inputs_is_a_400():
@@ -209,6 +228,30 @@ def test_get_jobs_is_newest_first_and_filters_by_status():
         ["job-running"],
         3,
     )
+
+
+def test_get_jobs_lists_only_the_callers_runs():
+    m = manager(FakeRuntime([DONE, THEIRS, NOBODYS]))
+    jobs = m.get_jobs()
+    assert ([j["identifier"] for j in jobs["jobs"]], jobs["numberMatched"]) == (["job-done"], 1)
+
+
+@pytest.mark.parametrize("job_id", ["job-theirs", "job-nobodys"])
+@pytest.mark.parametrize("operation", ["get_job", "get_job_result", "delete_job"])
+def test_another_callers_job_is_not_found(job_id, operation):
+    m = manager(FakeRuntime([THEIRS, NOBODYS], outputs={job_id: {"run": "s3://my-bucket/k.tgz"}}))
+    with pytest.raises(JobNotFoundError):                 # 404 like a missing job: no hint that it exists
+        getattr(m, operation)(job_id)
+    assert job_id in m.runtime.runs                        # and a refused delete deletes nothing
+
+
+def test_without_a_caller_nothing_is_read_or_run():
+    m = manager(FakeRuntime([DONE]))
+    for call in (lambda: m.get_job("job-done"), m.get_jobs,
+                 lambda: m.execute_process("ngiab-simulation", INPUTS)):
+        with pytest.raises(caller.NoCaller):
+            contextvars.Context().run(call)                # an empty context: what the manager sees outside guard()
+    assert m.runtime.submitted == []
 
 
 def test_an_unknown_job_is_not_found():

@@ -1,9 +1,11 @@
 # pygeoapi on the local kind cluster (hydrowf-deploy/local): Argo at https://localhost:2746,
-# RustFS (S3) at http://localhost:9000. Development only: no auth, self-signed Argo certificate.
+# RustFS (S3) at http://localhost:9000. Development only: self-signed Argo certificate. Served by the
+# Tethys portal (tethys/README.md): every job belongs to the bearer token's user, which guard() hands
+# to ArgoManager. Under plain `pygeoapi serve` there is no caller, so the catalogue works but job and
+# execute routes refuse (500, NoCaller).
 #
 #   export PYGEOAPI_CONFIG=pygeoapi-config.yml PYGEOAPI_OPENAPI=pygeoapi-openapi.yml
 #   uv run --python 3.12 pygeoapi openapi generate $PYGEOAPI_CONFIG --output-file $PYGEOAPI_OPENAPI
-#   uv run --python 3.12 pygeoapi serve
 server:
   bind:
     host: 127.0.0.1
