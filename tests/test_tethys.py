@@ -210,6 +210,19 @@ def test_a_half_configured_downloads_section_fails_at_startup(urls, monkeypatch,
     importlib.reload(module)
 
 
+def test_a_retention_that_is_not_whole_days_fails_at_startup(urls, monkeypatch, tmp_path):
+    config = yaml.safe_load(Path(os.environ["PYGEOAPI_CONFIG"]).read_text())
+    config["server"]["manager"]["connection"]["retention"] = {"days": 0}
+    broken = tmp_path / "pygeoapi-config.yml"
+    broken.write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("PYGEOAPI_CONFIG", str(broken))
+    module = importlib.import_module("hydrowf_platform.tethys.settings")
+    with pytest.raises(ImproperlyConfigured, match="retention"):
+        importlib.reload(module)
+    monkeypatch.undo()
+    importlib.reload(module)
+
+
 def test_a_shared_input_that_is_not_a_prefix_fails_at_startup(urls, monkeypatch, tmp_path):
     config = yaml.safe_load(Path(os.environ["PYGEOAPI_CONFIG"]).read_text())
     config["server"]["manager"]["connection"]["shared_inputs"] = ["hydrofabric"]   # no slash: hydrofabric-x/ too

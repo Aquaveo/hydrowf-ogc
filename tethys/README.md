@@ -86,6 +86,25 @@ input must be an output of one of the caller's own jobs, or under a `shared_inpu
 manager config (`[hydrofabric/]` here). A key in another bucket, or with characters other than
 `A-Z a-z 0-9 . _ / -`, is `400`; any other key is `403`, and nothing is submitted.
 
+## Retention
+
+A finished job is kept for `connection.retention.days` (30 if unset), then Argo deletes its workflow
+(`ttlStrategy`). Deleting a workflow deletes its outputs and archived logs from the bucket too
+(`artifactGC: OnWorkflowDeletion`, which runs a small Argo pod), so expiry and `DELETE /ogc/jobs/{id}`
+both free the space. The clock starts when a job finishes, so a running job is never deleted;
+an *input* it takes from another of the caller's jobs can be, though (see Known gaps).
+Workflows submitted before this have neither setting; remove them, and their `<job id>/` keys,
+by hand.
+
+On a new cluster, the cleanup pod needs what Argo's quick-start gives the `default` service account
+in kind: a Role on `workflowartifactgctasks` (`list`, `watch`) and `workflowartifactgctasks/status`
+(`patch`) bound to the workflows' service account, and S3 delete rights through the artifact
+repository's credentials (or the workload identity, when there are no keys). If the cleanup fails,
+the workflow stays, being deleted (`ArtifactGCError` in its conditions), and still shows in the job
+list: fix the cause, then remove its `workflows.argoproj.io/artifact-gc` finalizer and delete the
+`<job id>/` keys by hand. `forceFinalizerRemoval` is left off on purpose, so a failed cleanup is
+seen rather than leaving files behind unnoticed.
+
 ## Bearer tokens (Keycloak)
 
 Set `HYDROWF_OIDC_ISSUER` (the realm URL, e.g. `https://<keycloak>/realms/hydrowf`) and
@@ -143,10 +162,15 @@ tethys-uvx v0.1.0 (Tethys 4.6.2.dev8, Django 5.2.18, Python 3.12.15), pygeoapi 0
 | B executes with that same output, or an output of a job that doesn't exist | 403 each, the same message; nothing submitted |
 | B executes with `hydrofabric/../<A's job>/…`, or `hydrofabric/{{=sprig.repeat(2, '.')}}/<A's job>/…` (Argo would expand it to `..`) | 400, nothing submitted |
 | B executes with `s3://other-bucket/hydrofabric/…` | 400 |
+| execute (`retention: {days: 30}`) | the workflow has `ttlStrategy.secondsAfterCompletion: 2592000` and `artifactGC: OnWorkflowDeletion` |
+| `DELETE /ogc/jobs/{id}` on a finished job with 4 objects under `<job id>/` | 200; the workflow and all 4 objects are gone |
+| a workflow with `secondsAfterCompletion: 15` (probe) | deleted by Argo about 40 s after it finished, its objects with it |
 | B executes with `s3://my-bucket/hydrofabric/v2.2/conus_nextgen.gpkg` (shared) | 201 |
 
 ## Known gaps
 
+- **No storage quota yet.** Space is bounded only by `retention.days` (30 by default). A per-user quota (50 GB: evict the
+  caller's oldest finished jobs, never running ones or one this run reads, then refuse) is planned.
 - **Groups and admins.** A caller sees only their own jobs; sharing with a Keycloak group, or an
   admin who sees everyone's, comes with the authorization work.
 - **Inputs are job outputs or shared data.** A file or directory input must be in the cluster's bucket
@@ -154,8 +178,12 @@ tethys-uvx v0.1.0 (Tethys 4.6.2.dev8, Django 5.2.18, Python 3.12.15), pygeoapi 0
   under a `shared_inputs` prefix in the manager config (`hydrofabric/`). Keys use plain characters
   only (`A-Z a-z 0-9 . _ / -`, so no Argo `{{…}}` expressions) and no empty, `.` or `..` part; a
   key that breaks that, or is in another bucket, is 400. Any other key is 403, the same whether the
-  job exists or not. There are no per-user uploads yet, and a deleted job's outputs
-  stay in the bucket but can no longer be passed as inputs.
+  job exists or not. There are no per-user uploads yet. A deleted or expired job's outputs are
+  removed with it (see Retention), so they can no longer be passed as inputs.
+- **An input can expire before it is read.** Argo fetches a step's inputs when its pod starts, which
+  can be much later than the submit (a full cluster, a late step). If the job that made an input
+  reaches `retention.days` in between, its outputs are gone and the step fails to load them. The
+  planned quota keeps the jobs a running job reads; until then, re-run the source job if it happens.
 - **Workflows from before owners** have no `hydrowf/owner` label: nobody can see or dismiss them
   through `/ogc`. Remove them with `argo delete` or a TTL.
 - **A broken URL module fails quietly.** Tethys logs and skips an `ADDITIONAL_URLPATTERNS` entry it
