@@ -244,7 +244,6 @@ def test_any_other_key_is_forbidden_and_nothing_runs(url):
 
 @pytest.mark.parametrize("url", [
     "s3://my-bucket/hydrofabric/../job-theirs/x.tgz",    # out of the shared prefix by `..`
-    "s3://my-bucket/hydrofabric/{{=sprig.repeat(2, '.')}}/job-theirs/x.tgz",   # Argo would expand it to ..
     "s3://my-bucket/hydrofabric/..\\job-theirs/x.tgz",   # a backslash
     "s3://my-bucket/hydrofabric//x.gpkg",                # an empty part
     "s3://my-bucket/hydrofabric/./x.gpkg",               # a . part
@@ -254,6 +253,14 @@ def test_a_key_that_argo_or_the_store_could_read_differently_is_a_400(url):
     m = manager(FakeRuntime([DONE, THEIRS]))
     with pytest.raises(BadExecuteRequest, match="A-Z a-z 0-9 . _ / - only"):
         m.execute_process("ngiab-simulation", run_with(url))
+    assert m.runtime.submitted == []
+
+
+def test_a_key_with_an_argo_template_is_refused_before_the_manager_looks_at_it():
+    m = manager(FakeRuntime([THEIRS]))
+    # refused by core's render(), before the manager checks the key
+    with pytest.raises(BadExecuteRequest, match=r"\{, \}, \$ and control characters are not allowed"):
+        m.execute_process("ngiab-simulation", run_with("s3://my-bucket/hydrofabric/{{=sprig.repeat(2, '.')}}/x.tgz"))
     assert m.runtime.submitted == []
 
 
