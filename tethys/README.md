@@ -105,6 +105,24 @@ list: fix the cause, then remove its `workflows.argoproj.io/artifact-gc` finaliz
 `<job id>/` keys by hand. `forceFinalizerRemoval` is left off on purpose, so a failed cleanup is
 seen rather than leaving files behind unnoticed.
 
+## Resources
+
+Each step reserves its tool's `cpu` and `ram_mb` (requests), and its memory is capped there
+(limits): a step that outgrows `ram_mb` is OOMKilled and fails alone, instead of running the node
+out of memory under other users' steps. CPU is not capped, so a step may use idle cores; when cores
+are short, Kubernetes shares them by request. Raise a tool's `ram_mb` in `registry/legos.yaml` if
+its step is OOMKilled.
+
+Peaks measured on kind (calibration of gage-01031510, 2 years, 3 iterations; cgroup `memory.peak`,
+sampled every 10 s, so lower bounds):
+
+| Step | Peak | Limit (`ram_mb`) |
+|---|---|---|
+| calibrate | 1723 MiB | 4096 MiB |
+| run | 887 MiB | 2048 MiB |
+| to-cng | 1430 MiB | 2048 MiB |
+| preprocess | not measured yet | 16384 MiB |
+
 ## Bearer tokens (Keycloak)
 
 Set `HYDROWF_OIDC_ISSUER` (the realm URL, e.g. `https://<keycloak>/realms/hydrowf`) and
@@ -164,6 +182,7 @@ tethys-uvx v0.1.0 (Tethys 4.6.2.dev8, Django 5.2.18, Python 3.12.15), pygeoapi 0
 | B executes with `s3://other-bucket/hydrofabric/…` | 400 |
 | execute (`retention: {days: 30}`) | the workflow has `ttlStrategy.secondsAfterCompletion: 2592000` and `artifactGC: OnWorkflowDeletion` |
 | `DELETE /ogc/jobs/{id}` on a finished job with 4 objects under `<job id>/` | 200; the workflow and all 4 objects are gone |
+| calibration with memory limits on every step | succeeded in 16 min; no step OOMKilled or restarted |
 | a workflow with `secondsAfterCompletion: 15` (probe) | deleted by Argo about 40 s after it finished, its objects with it |
 | B executes with `s3://my-bucket/hydrofabric/v2.2/conus_nextgen.gpkg` (shared) | 201 |
 
