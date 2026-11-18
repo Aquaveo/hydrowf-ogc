@@ -81,6 +81,11 @@ request to the manager, so `guard()` hands the owner over in a context variable
 ([caller.py](../src/hydrowf_platform/caller.py)); a manager reached without one (e.g. under
 `pygeoapi serve`) refuses.
 
+Inputs are checked too, since Argo reads them with the cluster's credentials: a file or directory
+input must be an output of one of the caller's own jobs, or under a `shared_inputs` prefix of the
+manager config (`[hydrofabric/]` here). A key in another bucket, or with characters other than
+`A-Z a-z 0-9 . _ / -`, is `400`; any other key is `403`, and nothing is submitted.
+
 ## Bearer tokens (Keycloak)
 
 Set `HYDROWF_OIDC_ISSUER` (the realm URL, e.g. `https://<keycloak>/realms/hydrowf`) and
@@ -134,15 +139,23 @@ tethys-uvx v0.1.0 (Tethys 4.6.2.dev8, Django 5.2.18, Python 3.12.15), pygeoapi 0
 | B `GET`, `GET …/results`, `DELETE` on A's job | 404 each; the workflow is still there |
 | A `DELETE` on A's job | 200; the workflow is gone |
 | a workflow from before owners (no label) | 404 |
+| A executes with an output of A's job as the `hydrofabric` input | 201 |
+| B executes with that same output, or an output of a job that doesn't exist | 403 each, the same message; nothing submitted |
+| B executes with `hydrofabric/../<A's job>/…`, or `hydrofabric/{{=sprig.repeat(2, '.')}}/<A's job>/…` (Argo would expand it to `..`) | 400, nothing submitted |
+| B executes with `s3://other-bucket/hydrofabric/…` | 400 |
+| B executes with `s3://my-bucket/hydrofabric/v2.2/conus_nextgen.gpkg` (shared) | 201 |
 
 ## Known gaps
 
 - **Groups and admins.** A caller sees only their own jobs; sharing with a Keycloak group, or an
   admin who sees everyone's, comes with the authorization work.
-- **Inputs are any S3 key.** A file input is any `s3://<bucket>/<key>`, and outputs are stored under
-  `<job id>/<pod>/…`. A caller who knows another job's id (a uuid1, not a secret) could pass its
-  outputs into their own run and download that. Closing it means checking input keys against the
-  caller's own jobs or a per-user prefix.
+- **Inputs are job outputs or shared data.** A file or directory input must be in the cluster's bucket
+  and either an output of one of the caller's own jobs (Argo stores outputs under `<job id>/`) or
+  under a `shared_inputs` prefix in the manager config (`hydrofabric/`). Keys use plain characters
+  only (`A-Z a-z 0-9 . _ / -`, so no Argo `{{…}}` expressions) and no empty, `.` or `..` part; a
+  key that breaks that, or is in another bucket, is 400. Any other key is 403, the same whether the
+  job exists or not. There are no per-user uploads yet, and a deleted job's outputs
+  stay in the bucket but can no longer be passed as inputs.
 - **Workflows from before owners** have no `hydrowf/owner` label: nobody can see or dismiss them
   through `/ogc`. Remove them with `argo delete` or a TTL.
 - **A broken URL module fails quietly.** Tethys logs and skips an `ADDITIONAL_URLPATTERNS` entry it
