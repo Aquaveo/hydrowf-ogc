@@ -12,7 +12,8 @@ from pygeoapi.util import JobStatus
 from hydrowf_core.adapters.argo_runtime import RunStatus
 from hydrowf_platform import caller
 from hydrowf_platform.downloads import Presigner
-from hydrowf_platform.manager import ArgoManager, BadExecuteRequest, ForbiddenInput, job_dict, shared_prefixes
+from hydrowf_platform.manager import (ArgoManager, BadExecuteRequest, ForbiddenInput, job_dict, keep_days,
+                                      shared_prefixes)
 
 REGISTRY = Path(__file__).parent / "fixtures" / "legos.yaml"
 PROCESSOR = {
@@ -71,7 +72,7 @@ class FakeRuntime:
             raise NotFound(name)
 
 
-def manager(runtime=None, presigner=None):
+def manager(runtime=None, presigner=None, **connection):
     return ArgoManager(
         {
             "name": "hydrowf_platform.manager.ArgoManager",
@@ -81,6 +82,7 @@ def manager(runtime=None, presigner=None):
                 "bucket": "my-bucket",
                 "entrypoints": {NGEN: ["/ngen/HelloNGEN.sh"]},
                 "shared_inputs": ["hydrofabric/"],
+                **connection,
             },
             "processes": {
                 "ngiab-simulation": {"type": "process", "processor": PROCESSOR}
@@ -201,6 +203,28 @@ def test_execute_submits_the_rendered_pipeline_named_after_the_job():
     )
     assert m.get_job(job_id)["status"] == "accepted"
     assert workflow["metadata"]["labels"][caller.OWNER_LABEL] == ME          # the run is the caller's
+
+
+def test_a_job_and_its_outputs_are_kept_30_days_by_default():
+    m = manager()
+    m.execute_process("ngiab-simulation", INPUTS)
+    [workflow] = m.runtime.submitted
+    assert workflow["spec"]["ttlStrategy"] == {"secondsAfterCompletion": 30 * 86400}
+    assert workflow["spec"]["artifactGC"] == {"strategy": "OnWorkflowDeletion"}   # deleting it deletes them
+
+
+def test_retention_days_come_from_the_config():
+    m = manager(retention={"days": 7})
+    m.execute_process("ngiab-simulation", INPUTS)
+    assert m.runtime.submitted[0]["spec"]["ttlStrategy"] == {"secondsAfterCompletion": 7 * 86400}
+    assert keep_days(None) == keep_days({}) == 30
+
+
+@pytest.mark.parametrize("retention", [{"days": 0}, {"days": 1.5}, {"days": "30"}, {"days": True}, "30", [30],
+                                       {"days": 3651}, {"day": 7}])     # too long for Argo; a misspelt key
+def test_retention_is_a_whole_number_of_days(retention):
+    with pytest.raises(ValueError, match="retention"):
+        keep_days(retention)
 
 
 def test_execute_with_bad_inputs_is_a_400():

@@ -16,7 +16,7 @@ from pygeoapi.openapi import load_openapi_document
 from pygeoapi.util import get_api_rules
 
 from hydrowf_platform.downloads import presigner_from
-from hydrowf_platform.manager import shared_prefixes
+from hydrowf_platform.manager import keep_days, shared_prefixes
 
 __all__ = ["PYGEOAPI_CONFIG", "OPENAPI_DOCUMENT", "API_RULES", "OIDC_ISSUER", "OIDC_AUDIENCE"]
 
@@ -36,5 +36,6 @@ except (ValueError, TypeError, AttributeError) as err:          # e.g. expires: 
     raise ImproperlyConfigured(f"server.manager.connection.downloads: {err}") from err
 try:
     shared_prefixes(_CONNECTION.get("shared_inputs"))
+    keep_days(_CONNECTION.get("retention"))
 except ValueError as err:
     raise ImproperlyConfigured(f"server.manager.connection.{err}") from err

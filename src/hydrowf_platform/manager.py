@@ -22,6 +22,7 @@ pygeoapi config:
           entrypoints: {}                          # image -> ENTRYPOINT, for tools without `command`
           downloads: {endpoint: https://s3.example.org}   # presigned result links: see downloads.py
           shared_inputs: [hydrofabric/]            # key prefixes every caller may pass as an input
+          retention: {days: 30}                    # a finished job and its outputs are deleted after (default 30)
         output_dir: /tmp                           # required by pygeoapi's schema; unused
 
 The Argo token comes from HYDROWF_ARGO_TOKEN, never from the config file.
@@ -42,7 +43,7 @@ from pygeoapi.process.base import (BaseProcessor, JobNotFoundError, JobResultNot
 from pygeoapi.process.manager.base import BaseManager
 from pygeoapi.util import DATETIME_FORMAT, JobStatus
 
-from hydrowf_core.adapters.argo import FILE_TYPES, BadInputs, UnsupportedForArgo, render
+from hydrowf_core.adapters.argo import FILE_TYPES, MAX_KEEP_DAYS, BadInputs, UnsupportedForArgo, render
 from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
 from hydrowf_platform import caller
 from hydrowf_platform.downloads import Presigner, presigner_from, split_s3_url
@@ -133,6 +134,20 @@ def clean_key(key: str) -> bool:
         part not in ("", ".", "..") for part in key.removesuffix("/").split("/"))
 
 
+KEEP_DAYS = 30
+
+
+def keep_days(retention: object) -> int:
+    """The config's retention.days: how long a finished job and its outputs are kept. ValueError when
+    the section isn't {days: <whole number of days, 1 to MAX_KEEP_DAYS>}."""
+    if retention is None:
+        return KEEP_DAYS
+    days = retention.get("days", KEEP_DAYS) if isinstance(retention, dict) and set(retention) <= {"days"} else None
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= MAX_KEEP_DAYS:
+        raise ValueError(f"retention: {retention!r} is not {{days: <whole number of days, 1 to {MAX_KEEP_DAYS}>}}")
+    return days
+
+
 def shared_prefixes(value: object) -> tuple[str, ...]:
     """The config's shared_inputs: key prefixes like `hydrofabric/`. ValueError when one isn't."""
     if value is None:
@@ -163,6 +178,7 @@ class ArgoManager(BaseManager):
         self.entrypoints: dict[str, list[str]] = argo.get("entrypoints", {})
         self.bucket: str = argo["bucket"]
         self.shared_inputs = shared_prefixes(argo.get("shared_inputs"))
+        self.keep_days = keep_days(argo.get("retention"))
         self.runtime: Any = manager_def.get("runtime") or ArgoRuntime(   # `runtime`: tests pass a fake
             host=os.environ.get("HYDROWF_ARGO_HOST", argo.get("host", "")),
             bucket=self.bucket,
@@ -180,7 +196,7 @@ class ArgoManager(BaseManager):
             raise ProcessorExecuteError(user_msg=f"{p!r} is not a PipelineProcessor")
         try:
             workflow = render(p.pipeline, p.legos, data_dict, self.entrypoints.get, name=job_id,
-                              labels={caller.OWNER_LABEL: caller.owner()})
+                              labels={caller.OWNER_LABEL: caller.owner()}, keep_days=self.keep_days)
         except (BadInputs, UnsupportedForArgo) as err:
             raise BadExecuteRequest(user_msg=str(err)) from err
         self.check_inputs(p, data_dict)
@@ -269,5 +285,5 @@ class ArgoManager(BaseManager):
     def delete_job(self, job_id: str) -> bool:
         self._run(job_id)                          # only the caller's own
         with job_lookup(job_id):
-            self.runtime.delete(job_id)
+            self.runtime.delete(job_id)            # its outputs go too (render's artifactGC)
         return True
