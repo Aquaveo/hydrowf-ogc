@@ -16,6 +16,7 @@ from pygeoapi.openapi import load_openapi_document
 from pygeoapi.util import get_api_rules
 
 from hydrowf_platform.downloads import presigner_from
+from hydrowf_platform.manager import shared_prefixes
 
 __all__ = ["PYGEOAPI_CONFIG", "OPENAPI_DOCUMENT", "API_RULES", "OIDC_ISSUER", "OIDC_AUDIENCE"]
 
@@ -28,7 +29,12 @@ OIDC_AUDIENCE = os.environ.get("HYDROWF_OIDC_AUDIENCE")    # the audience /ogc t
 if OIDC_ISSUER and not OIDC_AUDIENCE:                      # at startup, not on the first token
     raise ImproperlyConfigured("HYDROWF_OIDC_ISSUER is set but HYDROWF_OIDC_AUDIENCE is not")
 
+_CONNECTION = (PYGEOAPI_CONFIG["server"].get("manager") or {}).get("connection") or {}
 try:                                                       # the same: at startup, not on every request
-    presigner_from(((PYGEOAPI_CONFIG["server"].get("manager") or {}).get("connection") or {}).get("downloads"))
+    presigner_from(_CONNECTION.get("downloads"))
 except (ValueError, TypeError, AttributeError) as err:          # e.g. expires: null, downloads: "x"
     raise ImproperlyConfigured(f"server.manager.connection.downloads: {err}") from err
+try:
+    shared_prefixes(_CONNECTION.get("shared_inputs"))
+except ValueError as err:
+    raise ImproperlyConfigured(f"server.manager.connection.{err}") from err

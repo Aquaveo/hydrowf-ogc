@@ -28,6 +28,7 @@ server:
       bucket: my-bucket
       verify_ssl: false          # kind's argo-server has a self-signed certificate
       entrypoints: {}
+      shared_inputs: [hydrofabric/]   # keys any caller may pass as inputs; else only their jobs' outputs
     output_dir: /tmp             # required by pygeoapi's schema; ArgoManager doesn't use it
 
 logging:

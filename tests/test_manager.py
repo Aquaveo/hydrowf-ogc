@@ -12,7 +12,7 @@ from pygeoapi.util import JobStatus
 from hydrowf_core.adapters.argo_runtime import RunStatus
 from hydrowf_platform import caller
 from hydrowf_platform.downloads import Presigner
-from hydrowf_platform.manager import ArgoManager, BadExecuteRequest, job_dict
+from hydrowf_platform.manager import ArgoManager, BadExecuteRequest, ForbiddenInput, job_dict, shared_prefixes
 
 REGISTRY = Path(__file__).parent / "fixtures" / "legos.yaml"
 PROCESSOR = {
@@ -80,6 +80,7 @@ def manager(runtime=None, presigner=None):
             "connection": {
                 "bucket": "my-bucket",
                 "entrypoints": {NGEN: ["/ngen/HelloNGEN.sh"]},
+                "shared_inputs": ["hydrofabric/"],
             },
             "processes": {
                 "ngiab-simulation": {"type": "process", "processor": PROCESSOR}
@@ -208,6 +209,75 @@ def test_execute_with_bad_inputs_is_a_400():
             "ngiab-simulation", {k: v for k, v in INPUTS.items() if k != "start_date"}
         )
     assert err.value.http_status_code == 400
+
+
+# ---- execute: file and directory inputs are the caller's own job outputs or shared
+
+OUTPUT_OF = "s3://my-bucket/{}/{}-step-run-1/ngen-run.tgz".format
+
+
+def run_with(hydrofabric):
+    return {**INPUTS, "hydrofabric": hydrofabric}
+
+
+def test_an_output_of_the_callers_own_job_is_an_input():
+    m = manager(FakeRuntime([DONE]))
+    m.execute_process("ngiab-simulation", run_with(OUTPUT_OF("job-done", "job-done")))
+    assert len(m.runtime.submitted) == 1
+
+
+@pytest.mark.parametrize("url", [
+    OUTPUT_OF("job-theirs", "job-theirs"),               # another caller's job
+    OUTPUT_OF("job-nobodys", "job-nobodys"),             # a job from before owners
+    OUTPUT_OF("job-gone", "job-gone"),                   # no such job (or a deleted one)
+    "s3://my-bucket/hydrofabric-v3/conus.gpkg",          # a name that only starts like the prefix
+    "s3://my-bucket/Not_A_Job/x.tgz",                    # can't be a workflow name: Argo isn't asked
+    "s3://my-bucket/job-done",                           # a bare job id is not one of its outputs
+])
+def test_any_other_key_is_forbidden_and_nothing_runs(url):
+    m = manager(FakeRuntime([DONE, THEIRS, NOBODYS]))
+    with pytest.raises(ForbiddenInput, match="neither an output of one of your jobs nor a shared input") as err:
+        m.execute_process("ngiab-simulation", run_with(url))
+    assert err.value.http_status_code == 403              # the same answer whether the job exists or not
+    assert m.runtime.submitted == []
+
+
+@pytest.mark.parametrize("url", [
+    "s3://my-bucket/hydrofabric/../job-theirs/x.tgz",    # out of the shared prefix by `..`
+    "s3://my-bucket/hydrofabric/{{=sprig.repeat(2, '.')}}/job-theirs/x.tgz",   # Argo would expand it to ..
+    "s3://my-bucket/hydrofabric/..\\job-theirs/x.tgz",   # a backslash
+    "s3://my-bucket/hydrofabric//x.gpkg",                # an empty part
+    "s3://my-bucket/hydrofabric/./x.gpkg",               # a . part
+    "s3://my-bucket//hydrofabric/x.gpkg",                # a leading /
+])
+def test_a_key_that_argo_or_the_store_could_read_differently_is_a_400(url):
+    m = manager(FakeRuntime([DONE, THEIRS]))
+    with pytest.raises(BadExecuteRequest, match="A-Z a-z 0-9 . _ / - only"):
+        m.execute_process("ngiab-simulation", run_with(url))
+    assert m.runtime.submitted == []
+
+
+def test_when_argo_cant_say_whose_job_it_is_nothing_runs():
+    class Down(FakeRuntime):
+        def status(self, name):
+            raise ConnectionError("argo-server unreachable")
+    m = manager(Down())
+    with pytest.raises(ConnectionError):                   # a 500, never "allowed"
+        m.execute_process("ngiab-simulation", run_with(OUTPUT_OF("job-done", "job-done")))
+    assert m.runtime.submitted == []
+
+
+def test_an_input_from_another_bucket_is_a_400():
+    m = manager()
+    with pytest.raises(BadExecuteRequest, match="read from s3://my-bucket/"):
+        m.execute_process("ngiab-simulation", run_with("s3://other-bucket/hydrofabric/v2.2/conus_nextgen.gpkg"))
+    assert m.runtime.submitted == []
+
+
+@pytest.mark.parametrize("prefixes", ["hydrofabric/", ["hydrofabric"], [""], ["/"], ["a/../b/"], [7]])
+def test_shared_inputs_are_key_prefixes_ending_in_a_slash(prefixes):
+    with pytest.raises(ValueError, match="shared_inputs"):
+        shared_prefixes(prefixes)
 
 
 # ---- reads
