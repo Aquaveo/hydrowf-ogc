@@ -90,12 +90,16 @@
   data_kind: output
   storage: {driver: stac, format: other}
 
-# From hydrowf-tools nextgen/ngiab-preprocess/ngiab-preprocess.cwl (the spec it was copied from).
+# Images built in hydrowf-tools (nextgen/<tool>/Dockerfile) are released by a tag <tool>/v<version>,
+# which publishes ghcr.io/aquaveo/<tool>:<version>. Each is pinned here by digest (the lego model takes
+# a tag or a digest, not both), with the version it was released as in a comment.
+
+# From hydrowf-tools nextgen/ngiab-preprocess (the spec it was copied from).
 - kind: tool
   id: ngiab-preprocess
   version: 4.9.5
   title: NGIAB data preprocess
-  image: hydrowf/ngiab-preprocess:4.9.5.dev2-02c4145
+  image: ghcr.io/aquaveo/ngiab-preprocess@sha256:9f6f9429c01a3e99cd81c1d0a738efcdff658075903c10504094c311ab874d5d   # 4.9.5.dev2-02c4145
   command: [cli]
   # The preprocessor reads the hydrofabric from ~/.ngiab/hydrofabric/v2.2/, so HOME is the workdir.
   env: {HOME: "{workdir}"}
@@ -165,14 +169,13 @@
   data_kind: output
   storage: {driver: stac, format: other}
 
-# From hydrowf-tools nextgen/ngiab-to-cng/ngiab-to-cng.cwl. The image is only built locally, so
-# `command` repeats its ENTRYPOINT: Argo's emissary asks the registry otherwise, and a registry
-# can't describe a local image (hydrowf-platform docs/argo-findings.md).
+# From hydrowf-tools nextgen/ngiab-to-cng. `command` repeats its ENTRYPOINT, so Argo's emissary
+# doesn't have to ask the registry for it (hydrowf-platform docs/argo-findings.md).
 - kind: tool
   id: ngiab-to-cng
   version: 0.1.0
   title: NGIAB run to cloud-native files
-  image: hydrowf/ngiab-to-cng:0.1.0
+  image: ghcr.io/aquaveo/ngiab-to-cng@sha256:7a41fef9514ccf984625ed1a03e4f6f0c019d7bcce55f89164f6b7af64c3cb42   # 0.1.0
   command: [python, /app/ngiab_to_cng.py]
   args:
     - "{ngen_run}"
@@ -190,15 +193,15 @@
   cpu: 1
   ram_mb: 2048
 
-# From hydrowf-tools nextgen/ngiab-calibrate/ngiab-calibrate.cwl (ngiab-cal + ngen-cal, built on the
-# image ngiab-run uses). Local image, so `command` repeats its ENTRYPOINT. The script copies the run
+# From hydrowf-tools nextgen/ngiab-calibrate (ngiab-cal + ngen-cal, built on the image ngiab-run
+# uses). `command` repeats its ENTRYPOINT, as for ngiab-to-cng. The script copies the run
 # folder to the output path and calibrates the copy (DDS, KGE against the gage's USGS observations):
 # the calibrated model_params go into config/realization.json, with a calibration/ folder beside it.
 - kind: tool
   id: ngiab-calibrate
   version: 0.2.0
   title: NextGen calibration (ngiab-cal)
-  image: hydrowf/ngiab-calibrate:0.2.0
+  image: ghcr.io/aquaveo/ngiab-calibrate@sha256:51a12857ac87b8b2a9decde21f9885370812752fc84816252e5f269258cef79b   # 0.2.0
   command: [/opt/ngiab_calibrate.sh]
   # The image runs as uid 1000, which has no passwd entry, so HOME is "/" and hydrotools' USGS cache
   # (~/.ngiab) can't be created; cwltool sets HOME to the output dir, Argo doesn't.
