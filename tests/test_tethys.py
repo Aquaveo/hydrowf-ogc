@@ -20,7 +20,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpResponse
-from django.middleware.csrf import _get_new_csrf_string
 from django.test import Client, RequestFactory
 from django.urls import resolve
 from jwt.algorithms import RSAAlgorithm
@@ -211,7 +210,7 @@ def test_a_half_configured_downloads_section_fails_at_startup(urls, monkeypatch,
     importlib.reload(module)
 
 
-# ---- guard(): allowed methods, bearer token, opt-in open reads, CSRF-checked session writes
+# ---- guard(): allowed methods, bearer token, opt-in open reads; no sessions
 
 
 def ok(request, *args, **kwargs):
@@ -222,28 +221,23 @@ ALL = ("GET", "HEAD", "OPTIONS", "POST", "DELETE", "PATCH")
 
 CREDENTIALS = {          # credential -> (request headers, made when the test runs; Tethys session logged in?)
     None: (dict, False),
-    "session": (dict, True),                                         # no CSRF token
-    "session+csrf": (dict, True),                                    # CSRF cookie and X-CSRFToken
+    "session": (dict, True),                                         # a logged-in Tethys user, no token
     "bearer": (lambda: {"HTTP_AUTHORIZATION": f"Bearer {token()}"}, False),
+    "bearer+session": (lambda: {"HTTP_AUTHORIZATION": f"Bearer {token()}"}, True),
     "bearer-expired": (lambda: {"HTTP_AUTHORIZATION": f"Bearer {BAD_TOKENS['expired']()}"}, False),
     "bearer-expired+session": (lambda: {"HTTP_AUTHORIZATION": f"Bearer {BAD_TOKENS['expired']()}"}, True),
     "bearer-lowercase": (lambda: {"HTTP_AUTHORIZATION": f"bearer  {token()} "}, False),   # RFC 6750: any case
     "bearer-tab": (lambda: {"HTTP_AUTHORIZATION": f" Bearer\t{token()}"}, False),         # any whitespace
     "bearer-empty+session": (lambda: {"HTTP_AUTHORIZATION": "Bearer "}, True),
-    "basic": (lambda: {"HTTP_AUTHORIZATION": "Basic dXNlcjpwYXNz"}, False),  # not ours: the session decides
+    "bearer-bad-sub": (lambda: {"HTTP_AUTHORIZATION": f"Bearer {token(sub='a,b')}"}, False),
+    "basic": (lambda: {"HTTP_AUTHORIZATION": "Basic dXNlcjpwYXNz"}, False),
     "basic+session": (lambda: {"HTTP_AUTHORIZATION": "Basic dXNlcjpwYXNz"}, True),
 }
 
 
-def request_with(method, credential, secure=False, **extra):
+def request_with(method, credential, **extra):
     make_headers, logged_in = CREDENTIALS[credential]
-    headers = {**make_headers(), **extra}
-    if credential == "session+csrf":
-        secret = _get_new_csrf_string()
-        headers["HTTP_X_CSRFTOKEN"] = secret
-    request = RequestFactory().generic(method, "/ogc/jobs/job-1", secure=secure, **headers)
-    if credential == "session+csrf":
-        request.COOKIES[settings.CSRF_COOKIE_NAME] = secret
+    request = RequestFactory().generic(method, "/ogc/jobs/job-1", **{**make_headers(), **extra})
     request.user = SimpleNamespace(is_authenticated=logged_in)
     return request
 
@@ -252,37 +246,36 @@ def request_with(method, credential, secure=False, **extra):
     ("GET", None, 401),                         # reads need a caller too: job results are download links
     ("OPTIONS", None, 401),
     ("HEAD", None, 401),
-    ("GET", "session", 200),                    # a session read needs no CSRF token
     ("POST", None, 401),
     ("DELETE", None, 401),
     ("PATCH", None, 401),                       # deny by default
-    ("POST", "session", 403),                   # session writes need the CSRF token, execute too
-    ("DELETE", "session", 403),
-    ("POST", "session+csrf", 200),
-    ("DELETE", "session+csrf", 200),
+    ("GET", "session", 401),                    # a session has no Keycloak identity: no jobs
+    ("POST", "session", 401),
+    ("DELETE", "session", 401),
     ("POST", "bearer", 200),
     ("DELETE", "bearer", 200),
     ("GET", "bearer", 200),
+    ("POST", "bearer+session", 200),            # the token decides; no CSRF, since no cookie is read
     ("POST", "bearer-expired", 401),
     ("GET", "bearer-expired", 401),             # a bad token is refused, not read as anonymous
     ("POST", "bearer-expired+session", 401),    # nor read as the session
     ("POST", "bearer-lowercase", 200),
     ("POST", "bearer-tab", 200),
     ("GET", "bearer-empty+session", 401),       # a malformed credential is refused too
-    ("GET", "basic", 401),                      # not ours, and no session: anonymous
-    ("GET", "basic+session", 200),
-    ("POST", "basic", 401),
+    ("GET", "bearer-bad-sub", 401),             # a sub that can't be an owner label owns nothing
+    ("GET", "basic", 401),                      # not ours
+    ("GET", "basic+session", 401),
 ])
 def test_guard(bearer, method, credential, status):
     response = urls_guard(ALL)(request_with(method, credential), job_id="job-1")
     assert response.status_code == status
-    if status in (401, 403):
+    if status == 401:
         assert "error" in json.loads(response.content)
 
 
-def urls_guard(methods, **options):
+def urls_guard(methods, view=ok, **options):
     from hydrowf_platform.tethys.urls import guard
-    return guard(ok, methods, **options)
+    return guard(view, methods, **options)
 
 
 @pytest.mark.parametrize("method, credential, status", [
@@ -299,21 +292,26 @@ def test_open_reads_open_only_the_reads(bearer, method, credential, status):
 
 
 @pytest.mark.parametrize("url", ["/ogc/jobs", "/ogc/jobs/job-1", "/ogc/jobs/job-1/results"])
-def test_jobs_are_not_open_to_anonymous_reads(urls, url):
+@pytest.mark.parametrize("logged_in", [False, True], ids=["anonymous", "session"])
+def test_jobs_need_a_token(urls, url, logged_in):
     request = RequestFactory().get(url)
-    request.user = SimpleNamespace(is_authenticated=False)
+    request.user = SimpleNamespace(is_authenticated=logged_in)
     match = resolve(url)
     assert match.func(request, **match.kwargs).status_code == 401
 
 
-@pytest.mark.parametrize("extra, status", [
-    ({}, 403),                                                   # HTTPS with no Origin and no Referer
-    ({"HTTP_ORIGIN": "https://evil.test"}, 403),
-    ({"HTTP_ORIGIN": "https://testserver"}, 200),
-], ids=["no-origin", "foreign-origin", "same-origin"])
-def test_session_writes_over_https_check_the_origin(bearer, extra, status):
-    request = request_with("POST", "session+csrf", secure=True, **extra)
-    assert urls_guard(ALL)(request).status_code == status
+def test_the_view_runs_as_the_tokens_owner(bearer):
+    from hydrowf_platform import caller
+    seen = []
+
+    def view(request, **kwargs):
+        seen.append(caller.owner())
+        return HttpResponse("ok")
+
+    urls_guard(ALL, view)(request_with("GET", "bearer"))
+    assert seen == ["user-1"]
+    with pytest.raises(caller.NoCaller):                    # and only for the length of that request
+        caller.owner()
 
 
 @pytest.mark.parametrize("url, method", [
@@ -332,16 +330,15 @@ def test_routes_refuse_methods_they_do_not_take(urls, url, method):
 
 
 def test_guard_hands_the_claims_to_the_view(bearer):
-    from hydrowf_platform.tethys.urls import guard
     seen = {}
 
     def view(request, **kwargs):
         seen.update(request.oidc_claims)
         return HttpResponse("ok")
 
-    guard(view, ALL)(request_with("POST", "bearer"))
+    urls_guard(ALL, view)(request_with("POST", "bearer"))
     assert seen["sub"] == "user-1"
 
 
-def test_every_route_leaves_csrf_to_guard(urls):
+def test_every_route_is_csrf_exempt(urls):            # no route reads the session cookie
     assert all(pattern.callback.csrf_exempt for pattern in urls.urlpatterns)

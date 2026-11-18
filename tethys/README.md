@@ -63,14 +63,23 @@ they are imported, so the settings module must not import them.
 1. **Method**: each route lists the methods it takes (`/execution` is `POST` only; `/jobs/{id}` adds
    `DELETE`; the rest are `GET`, `HEAD`, `OPTIONS`). Anything else is `405`. pygeoapi's views don't
    check the method: `process_execution` would execute the body of a `GET`.
-2. **Bearer token** (`Authorization: Bearer <token>`): a valid OIDC access token calls the view, with
-   its claims in `request.oidc_claims`; any other bearer token is `401`, never a fallback to the rules
-   below.
+2. **Bearer token** (`Authorization: Bearer <token>`): a valid OIDC access token calls the view acting
+   as the token's owner (its `sub`), with its claims in `request.oidc_claims`; any other bearer token,
+   or a `sub` that can't be an Argo label value, is `401`, never a fallback to the rules below.
 3. **Reads** (`GET`, `HEAD`, `OPTIONS`) are open only on the routes that opt in with `open_reads`: the
    landing page and the process catalogue. Jobs and their results (presigned download links) are not.
-4. **Everything else** needs a logged-in Tethys session (else `401`); a write must also pass Django's
-   CSRF check (`403` otherwise, logged on `django.security.csrf`). Every route is `csrf_exempt` so the middleware leaves this to
-   `guard()`: pygeoapi exempts `process_execution` itself, which would leave session executes unchecked.
+4. **Everything else** is `401`. Tethys sessions are not accepted: a job belongs to a Keycloak user,
+   and a session has no Keycloak identity. Every route is `csrf_exempt`: none reads the session
+   cookie, and a cross-site page can't set the `Authorization` header.
+
+## Job owners
+
+Each run belongs to the token's `sub`: execute labels the Argo workflow `hydrowf/owner=<sub>`, the
+job list shows only the caller's runs, and another caller's job (or a run from before owners, with
+no label) is `404` on read, results and dismiss, as if it didn't exist. pygeoapi never passes the
+request to the manager, so `guard()` hands the owner over in a context variable
+([caller.py](../src/hydrowf_platform/caller.py)); a manager reached without one (e.g. under
+`pygeoapi serve`) refuses.
 
 ## Bearer tokens (Keycloak)
 
@@ -95,7 +104,7 @@ the tokens `/ogc` checks, so `/ogc` never calls another cluster per request.
 Two ways to put Tethys in front of the OGC API were compared:
 
 - **(a) in-process** (this directory): Tethys imports pygeoapi's Django adapter. One service, one
-  `server.url`, Tethys's login and middleware apply directly.
+  `server.url`, and Tethys's middleware applies directly (`guard()` decides who may call).
 - **(b) proxy**: a login-protected Tethys view that streams requests to a separate `pygeoapi serve`.
   Two services, `Location` and `Prefer` headers to forward, and pygeoapi's `server.url` set to the
   proxied URL.
@@ -113,23 +122,29 @@ tethys-uvx v0.1.0 (Tethys 4.6.2.dev8, Django 5.2.18, Python 3.12.15), pygeoapi 0
 | Request | Answer |
 |---|---|
 | `GET /ogc/processes`, `GET /ogc/processes/ngiab-simulation` | 200; every link carries `/ogc` |
-| `POST /ogc/processes/ngiab-simulation/execution`, logged in, `Prefer: respond-async` | 201, `Location: …/ogc/jobs/{id}`; the Argo workflow is named after the job |
+| `POST /ogc/processes/ngiab-simulation/execution` with a token, `Prefer: respond-async` | 201, `Location: …/ogc/jobs/{id}`; the Argo workflow is named after the job |
 | `GET /ogc/jobs/{id}` | accepted, running, successful, following the workflow's phase |
 | `GET /ogc/jobs/{id}/results` | the `run` and `cng` outputs as `s3://` links; with `downloads`, presigned links (curl downloads `cng.tgz`; a changed or missing signature is 403) |
 | anonymous `GET /ogc/jobs`, `/ogc/jobs/{id}`, `/ogc/jobs/{id}/results` | 401 |
 | anonymous `POST …/execution` | 401 |
 | anonymous `GET …/execution` with a JSON body | 405 |
-| logged-in session `POST …/execution` without `X-CSRFToken` | 403 |
-| logged-in `DELETE /ogc/jobs/{id}` with `X-CSRFToken` | reaches pygeoapi (404 for an unknown job) |
 | Keycloak 26.0.7 token (client credentials, audience mapper), `POST …/execution` and `GET /ogc/jobs/{id}` | 201 with `Location`; status follows Argo |
 | tampered token | 401 |
+| two clients (different `sub`s): A submits | the workflow carries `hydrowf/owner=<A's sub>`; A's `/ogc/jobs` lists it, B's is empty |
+| B `GET`, `GET …/results`, `DELETE` on A's job | 404 each; the workflow is still there |
+| A `DELETE` on A's job | 200; the workflow is gone |
+| a workflow from before owners (no label) | 404 |
 
 ## Known gaps
 
-- **Authorization.** Any valid token or logged-in user may execute, and read or dismiss any job,
-  including its download links. Who owns a
-  job (the token's `sub` as an Argo workflow label) and what groups may do comes with the
-  authorization work.
+- **Groups and admins.** A caller sees only their own jobs; sharing with a Keycloak group, or an
+  admin who sees everyone's, comes with the authorization work.
+- **Inputs are any S3 key.** A file input is any `s3://<bucket>/<key>`, and outputs are stored under
+  `<job id>/<pod>/…`. A caller who knows another job's id (a uuid1, not a secret) could pass its
+  outputs into their own run and download that. Closing it means checking input keys against the
+  caller's own jobs or a per-user prefix.
+- **Workflows from before owners** have no `hydrowf/owner` label: nobody can see or dismiss them
+  through `/ogc`. Remove them with `argo delete` or a TTL.
 - **A broken URL module fails quietly.** Tethys logs and skips an `ADDITIONAL_URLPATTERNS` entry it
   cannot import, so a syntax error in `urls.py` shows up as a 404 on `/ogc`, not a failed start.
   `tests/test_tethys.py` imports it, so CI catches it.

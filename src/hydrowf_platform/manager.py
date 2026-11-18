@@ -3,7 +3,9 @@
 The manager keeps no job state. Executing a process renders the pipeline lego and submits it,
 named after pygeoapi's job id (so job id = workflow name = the run's {run}). Every other call reads
 Argo through hydrowf_core's ArgoRuntime: a job's status is the workflow's phase, the job list is the
-workflows render() labelled, results are links to the pipeline's outputs (presigned when configured). Any pygeoapi
+workflows render() labelled, results are links to the pipeline's outputs (presigned when configured).
+Every run belongs to the caller who submitted it (the hydrowf/owner label, hydrowf_platform.caller):
+the caller sees, reads and dismisses only their own. Any pygeoapi
 worker can answer for any job, and a restart loses nothing.
 
 pygeoapi config:
@@ -39,6 +41,7 @@ from pygeoapi.util import DATETIME_FORMAT, JobStatus
 
 from hydrowf_core.adapters.argo import BadInputs, UnsupportedForArgo, render
 from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
+from hydrowf_platform import caller
 from hydrowf_platform.downloads import Presigner, presigner_from
 from hydrowf_platform.processor import PipelineProcessor
 
@@ -141,7 +144,8 @@ class ArgoManager(BaseManager):
         if not isinstance(p, PipelineProcessor):
             raise ProcessorExecuteError(user_msg=f"{p!r} is not a PipelineProcessor")
         try:
-            workflow = render(p.pipeline, p.legos, data_dict, self.entrypoints.get, name=job_id)
+            workflow = render(p.pipeline, p.legos, data_dict, self.entrypoints.get, name=job_id,
+                              labels={caller.OWNER_LABEL: caller.owner()})
         except (BadInputs, UnsupportedForArgo) as err:
             raise BadExecuteRequest(user_msg=str(err)) from err
         self.runtime.submit(workflow)
@@ -161,15 +165,21 @@ class ArgoManager(BaseManager):
     # ---- reads: every answer comes from Argo
 
     def _run(self, job_id: str) -> RunStatus:
+        """The caller's run `job_id`. Someone else's run is a JobNotFoundError (404), like a missing one."""
+        me = caller.owner()                        # before Argo: no caller, no lookup
         with job_lookup(job_id):
-            return self.runtime.status(job_id)
+            run = self.runtime.status(job_id)
+        if run.labels.get(caller.OWNER_LABEL) != me:   # an unlabelled run (older than owners) is nobody's
+            raise JobNotFoundError(f"no job {job_id}")
+        return run
 
     def get_job(self, job_id: str) -> dict:
         return job_dict(self._run(job_id))
 
     def get_jobs(self, status: JobStatus | None = None, limit: int | None = None,
                  offset: int | None = None) -> dict:
-        jobs = [job_dict(run) for run in self.runtime.list()]          # newest first
+        mine = {caller.OWNER_LABEL: caller.owner()}
+        jobs = [job_dict(run) for run in self.runtime.list(labels=mine)]   # the caller's, newest first
         if status is not None:
             jobs = [job for job in jobs if job["status"] == status.value]
         start = offset or 0
@@ -183,6 +193,7 @@ class ArgoManager(BaseManager):
                           for name, url in self.runtime.outputs(job_id).items()}
 
     def delete_job(self, job_id: str) -> bool:
+        self._run(job_id)                          # only the caller's own
         with job_lookup(job_id):
             self.runtime.delete(job_id)
         return True
