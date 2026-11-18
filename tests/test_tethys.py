@@ -76,7 +76,7 @@ def test_ogc_routes_are_pygeoapi_views(urls, url, view):
 def test_process_list_through_django(urls):
     response = Client().get("/ogc/processes", {"f": "json"})
     assert response.status_code == 200
-    assert [p["id"] for p in json.loads(response.content)["processes"]] == ["ngiab-simulation"]
+    assert [p["id"] for p in json.loads(response.content)["processes"]] == ["ngiab-simulation", "ngiab-calibration"]
 
 
 # ---- bearer tokens: an RS256 JWT from ISSUER for AUDIENCE, signed with KEY
