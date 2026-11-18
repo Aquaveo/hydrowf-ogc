@@ -3,7 +3,7 @@
 The manager keeps no job state. Executing a process renders the pipeline lego and submits it,
 named after pygeoapi's job id (so job id = workflow name = the run's {run}). Every other call reads
 Argo through hydrowf_core's ArgoRuntime: a job's status is the workflow's phase, the job list is the
-workflows render() labelled, results are the s3:// links of the pipeline's outputs. Any pygeoapi
+workflows render() labelled, results are links to the pipeline's outputs (presigned when configured). Any pygeoapi
 worker can answer for any job, and a restart loses nothing.
 
 pygeoapi config:
@@ -17,6 +17,7 @@ pygeoapi config:
           bucket: my-bucket                        # the artifact repository bucket
           verify_ssl: true
           entrypoints: {}                          # image -> ENTRYPOINT, for tools without `command`
+          downloads: {endpoint: https://s3.example.org}   # presigned result links: see downloads.py
         output_dir: /tmp                           # required by pygeoapi's schema; unused
 
 The Argo token comes from HYDROWF_ARGO_TOKEN, never from the config file.
@@ -38,6 +39,7 @@ from pygeoapi.util import DATETIME_FORMAT, JobStatus
 
 from hydrowf_core.adapters.argo import BadInputs, UnsupportedForArgo, render
 from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
+from hydrowf_platform.downloads import Presigner, presigner_from
 from hydrowf_platform.processor import PipelineProcessor
 
 LOGGER = logging.getLogger(__name__)
@@ -94,6 +96,19 @@ def job_dict(run: RunStatus) -> dict:
     }
 
 
+def result_link(s3_url: str, presigner: Presigner | None) -> dict:
+    """One output in a job's results: an OGC link object for the s3://<bucket>/<key> .tgz.
+
+    href downloads it (presigned, it expires); s3 is the lasting address another pipeline takes as
+    an input. presigner is None when the manager config has no `downloads` section: the link is then
+    the s3:// URL alone, as before downloads existed.
+    """
+    if presigner is None:
+        return {"href": s3_url}
+    # every output is a file or directory Argo archives with its default (.tgz): render() sets no other
+    return {"href": presigner.url(s3_url), "type": "application/gzip", "s3": s3_url}
+
+
 @contextmanager
 def job_lookup(job_id: str) -> Iterator[None]:
     """Argo's NotFound is pygeoapi's JobNotFoundError (HTTP 404)."""
@@ -117,6 +132,7 @@ class ArgoManager(BaseManager):
             token=os.environ.get("HYDROWF_ARGO_TOKEN"),
             verify_ssl=argo.get("verify_ssl", True),
         )
+        self.presigner: Presigner | None = manager_def.get("presigner") or presigner_from(argo.get("downloads"))
 
     # ---- execute: render and submit, nothing stored here
 
@@ -163,7 +179,8 @@ class ArgoManager(BaseManager):
         run = self._run(job_id)
         if run.phase != "Succeeded":
             raise JobResultNotFoundError(f"job {job_id} is {run.phase}")
-        return MIMETYPE, {name: {"href": url} for name, url in self.runtime.outputs(job_id).items()}
+        return MIMETYPE, {name: result_link(url, self.presigner)
+                          for name, url in self.runtime.outputs(job_id).items()}
 
     def delete_job(self, job_id: str) -> bool:
         with job_lookup(job_id):

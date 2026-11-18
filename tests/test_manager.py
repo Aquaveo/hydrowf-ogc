@@ -9,6 +9,7 @@ from pygeoapi.process.base import JobNotFoundError, JobResultNotFoundError
 from pygeoapi.util import JobStatus
 
 from hydrowf_core.adapters.argo_runtime import RunStatus
+from hydrowf_platform.downloads import Presigner
 from hydrowf_platform.manager import ArgoManager, BadExecuteRequest, job_dict
 
 REGISTRY = Path(__file__).parent / "fixtures" / "legos.yaml"
@@ -66,11 +67,12 @@ class FakeRuntime:
             raise NotFound(name)
 
 
-def manager(runtime=None):
+def manager(runtime=None, presigner=None):
     return ArgoManager(
         {
             "name": "hydrowf_platform.manager.ArgoManager",
             "runtime": runtime or FakeRuntime(),
+            "presigner": presigner,
             "connection": {
                 "bucket": "my-bucket",
                 "entrypoints": {NGEN: ["/ngen/HelloNGEN.sh"]},
@@ -222,6 +224,29 @@ def test_results_are_links_once_the_run_succeeded():
     assert m.get_job_result("job-done") == ("application/json", {"run": {"href": url}})
     with pytest.raises(JobResultNotFoundError):
         m.get_job_result("job-running")
+
+
+def test_with_downloads_results_are_presigned_and_keep_the_s3_address():
+    url = "s3://my-bucket/job-done/job-done-step-run-1/ngen-run.tgz"
+    presigner = Presigner("https://s3.example.org", "reader", "secret", expires=600)
+    m = manager(FakeRuntime([DONE], outputs={"job-done": {"run": url}}), presigner=presigner)
+    _, results = m.get_job_result("job-done")
+    link = results["run"]
+    assert link["href"].startswith("https://s3.example.org/my-bucket/job-done/job-done-step-run-1/ngen-run.tgz?")
+    assert (link["type"], link["s3"]) == ("application/gzip", url)
+
+
+def test_the_downloads_section_turns_presigning_on(monkeypatch):
+    monkeypatch.delenv("HYDROWF_S3_PUBLIC_ENDPOINT", raising=False)
+    monkeypatch.setenv("HYDROWF_S3_ACCESS_KEY", "reader")
+    monkeypatch.setenv("HYDROWF_S3_SECRET_KEY", "secret")
+    url = "s3://my-bucket/job-done/job-done-step-run-1/ngen-run.tgz"
+    m = ArgoManager({                       # the path a pygeoapi config takes: connection.downloads
+        "name": "hydrowf_platform.manager.ArgoManager",
+        "runtime": FakeRuntime([DONE], outputs={"job-done": {"run": url}}),
+        "connection": {"bucket": "my-bucket", "downloads": {"endpoint": "https://s3.example.org"}},
+    })
+    assert m.get_job_result("job-done")[1]["run"]["href"].startswith("https://s3.example.org/my-bucket/")
 
 
 def test_delete_removes_the_run():

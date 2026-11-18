@@ -35,6 +35,16 @@ SQLite lives in the `hydrowf-tethys` volume. For PostgreSQL, drop `TETHYS_DB_ENG
 `HYDROWF_ARGO_TOKEN` point ArgoManager at another Argo server; `PYGEOAPI_SERVER_URL` must be the
 public URL of `/ogc`, since pygeoapi builds every link from it.
 
+Job results are `s3://` links unless the manager config has a `downloads` section
+([downloads.py](../src/hydrowf_platform/downloads.py)); with it, each result's `href` is a presigned
+HTTPS GET that expires, and `s3` keeps the address another pipeline takes as an input. The keys come
+from `HYDROWF_S3_ACCESS_KEY` and `HYDROWF_S3_SECRET_KEY` (a read-only key is enough), and
+`HYDROWF_S3_PUBLIC_ENDPOINT` overrides the endpoint. A section without an endpoint or a key stops the
+portal at startup. Only `guard()` keeps the links from anonymous callers, so never turn `downloads` on
+under `pygeoapi serve`, which has no guard. The shipped config leaves it off; on kind, mount
+a copy with `downloads: {endpoint: http://localhost:9000}` over `/opt/hydrowf/pygeoapi-config.yml`
+and port-forward `svc/minio` to 9000.
+
 ## How it is wired
 
 Two keys in [portal_config.yml](portal_config.yml), under `settings.TETHYS_PORTAL_CONFIG`:
@@ -56,9 +66,10 @@ they are imported, so the settings module must not import them.
 2. **Bearer token** (`Authorization: Bearer <token>`): a valid OIDC access token calls the view, with
    its claims in `request.oidc_claims`; any other bearer token is `401`, never a fallback to the rules
    below.
-3. **Reads** (`GET`, `HEAD`, `OPTIONS`) are open.
-4. **Writes** need a logged-in Tethys session that passes Django's CSRF check (`403` otherwise, logged
-   on `django.security.csrf`), else `401`. Every route is `csrf_exempt` so the middleware leaves this to
+3. **Reads** (`GET`, `HEAD`, `OPTIONS`) are open only on the routes that opt in with `open_reads`: the
+   landing page and the process catalogue. Jobs and their results (presigned download links) are not.
+4. **Everything else** needs a logged-in Tethys session (else `401`); a write must also pass Django's
+   CSRF check (`403` otherwise, logged on `django.security.csrf`). Every route is `csrf_exempt` so the middleware leaves this to
    `guard()`: pygeoapi exempts `process_execution` itself, which would leave session executes unchecked.
 
 ## Bearer tokens (Keycloak)
@@ -104,7 +115,8 @@ tethys-uvx v0.1.0 (Tethys 4.6.2.dev8, Django 5.2.18, Python 3.12.15), pygeoapi 0
 | `GET /ogc/processes`, `GET /ogc/processes/ngiab-simulation` | 200; every link carries `/ogc` |
 | `POST /ogc/processes/ngiab-simulation/execution`, logged in, `Prefer: respond-async` | 201, `Location: …/ogc/jobs/{id}`; the Argo workflow is named after the job |
 | `GET /ogc/jobs/{id}` | accepted, running, successful, following the workflow's phase |
-| `GET /ogc/jobs/{id}/results` | the `run` and `cng` outputs as `s3://` links |
+| `GET /ogc/jobs/{id}/results` | the `run` and `cng` outputs as `s3://` links; with `downloads`, presigned links (curl downloads `cng.tgz`; a changed or missing signature is 403) |
+| anonymous `GET /ogc/jobs`, `/ogc/jobs/{id}`, `/ogc/jobs/{id}/results` | 401 |
 | anonymous `POST …/execution` | 401 |
 | anonymous `GET …/execution` with a JSON body | 405 |
 | logged-in session `POST …/execution` without `X-CSRFToken` | 403 |
@@ -114,7 +126,8 @@ tethys-uvx v0.1.0 (Tethys 4.6.2.dev8, Django 5.2.18, Python 3.12.15), pygeoapi 0
 
 ## Known gaps
 
-- **Authorization.** Any valid token or logged-in user may execute, and dismiss any job. Who owns a
+- **Authorization.** Any valid token or logged-in user may execute, and read or dismiss any job,
+  including its download links. Who owns a
   job (the token's `sub` as an Argo workflow label) and what groups may do comes with the
   authorization work.
 - **A broken URL module fails quietly.** Tethys logs and skips an `ADDITIONAL_URLPATTERNS` entry it
@@ -123,6 +136,8 @@ tethys-uvx v0.1.0 (Tethys 4.6.2.dev8, Django 5.2.18, Python 3.12.15), pygeoapi 0
 - **Static files.** `provision.sh` collects static files inside the provisioning container, not the
   persist volume, so a separately started portal does not have them. The `/ogc` endpoints return JSON
   and don't need them; check it with the tethys-app Helm chart's provisioning Job.
+- **CORS.** A browser's preflight `OPTIONS` carries no credentials, so it gets 401 on the jobs routes.
+  A browser client on another origin needs CORS headers on `/ogc` first.
 
 ## Deploying
 

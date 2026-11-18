@@ -51,7 +51,7 @@ def csrf_failure(request: HttpRequest) -> str | None:
     return check.process_view(request, None, (), {})
 
 
-def guard(view: View, methods: tuple[str, ...] = SAFE_METHODS) -> View:
+def guard(view: View, methods: tuple[str, ...] = SAFE_METHODS, open_reads: bool = False) -> View:
     """`view` as Tethys serves it: the methods it takes, who may call it, and CSRF for cookie sessions.
 
     - A method not in `methods`: 405, before anything else. pygeoapi's views don't check the method
@@ -59,8 +59,10 @@ def guard(view: View, methods: tuple[str, ...] = SAFE_METHODS) -> View:
     - Authorization: Bearer <token>: a valid OIDC access token calls the view (no CSRF: a script set
       the header, a browser doesn't send it by itself); its claims go to request.oidc_claims. Any other
       bearer token is a 401, never a fallback to the anonymous rules.
-    - GET, HEAD, OPTIONS: open.
-    - Other methods: a logged-in Tethys session that passes Django's CSRF check (403 otherwise), else 401.
+    - GET, HEAD, OPTIONS: open on `open_reads` routes (the landing page and the process catalogue).
+      Elsewhere, as every other method: closed unless a route opts in, so a new route starts private.
+    - Otherwise a logged-in Tethys session (else 401); a write must also pass Django's CSRF check (403
+      otherwise), which reads always pass.
 
     Every wrapper is csrf_exempt, so CsrfViewMiddleware leaves the decision to guard(): pygeoapi exempts
     process_execution itself (views.py), which would leave session executes unchecked.
@@ -77,7 +79,7 @@ def guard(view: View, methods: tuple[str, ...] = SAFE_METHODS) -> View:
                 return unauthorized("Invalid bearer token")
             request.oidc_claims = claims
             return view(request, *args, **kwargs)
-        if request.method in SAFE_METHODS:
+        if open_reads and request.method in SAFE_METHODS:
             return view(request, *args, **kwargs)
         if not request.user.is_authenticated:
             return unauthorized()
@@ -90,9 +92,10 @@ def guard(view: View, methods: tuple[str, ...] = SAFE_METHODS) -> View:
 
 
 urlpatterns = [
-    path("ogc", guard(views.landing_page)),
-    path("ogc/processes", guard(views.processes)),
-    path("ogc/processes/<str:process_id>", guard(views.processes)),
+    path("ogc", guard(views.landing_page, open_reads=True)),
+    path("ogc/processes", guard(views.processes, open_reads=True)),
+    path("ogc/processes/<str:process_id>", guard(views.processes, open_reads=True)),
+    # Jobs and their results (presigned download links) need a caller: no open_reads
     path("ogc/processes/<str:process_id>/execution", guard(views.process_execution, ("POST",))),
     path("ogc/jobs", guard(views.jobs)),
     path("ogc/jobs/<str:job_id>", guard(views.jobs, SAFE_METHODS + ("DELETE",))),
