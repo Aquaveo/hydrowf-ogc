@@ -129,7 +129,7 @@ NOBODYS = RunStatus("job-nobodys", "Succeeded", pipeline="ngiab-simulation",   #
 
 @pytest.fixture(autouse=True)
 def as_me():
-    """Every test runs as ME, the way guard() runs a request with a verified token."""
+    """Every test runs as ME, the way the service runs a request with a verified token."""
     with caller.acting_as(ME):
         yield
 
@@ -351,7 +351,7 @@ def test_without_a_caller_nothing_is_read_or_run():
     for call in (lambda: m.get_job("job-done"), m.get_jobs,
                  lambda: m.execute_process("ngiab-simulation", INPUTS)):
         with pytest.raises(caller.NoCaller):
-            contextvars.Context().run(call)                # an empty context: what the manager sees outside guard()
+            contextvars.Context().run(call)                # an empty context: what the manager sees outside a request
     assert m.runtime.submitted == []
 
 

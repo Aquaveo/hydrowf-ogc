@@ -1,7 +1,7 @@
 # pygeoapi on the local kind cluster (hydrowf-deploy/local): Argo at https://localhost:2746,
-# RustFS (S3) at http://localhost:9000. Development only: self-signed Argo certificate. Served by the
-# Tethys portal (tethys/README.md): every job belongs to the bearer token's user, which guard() hands
-# to ArgoManager. Under plain `pygeoapi serve` there is no caller, so the catalogue works but job and
+# RustFS (S3) at http://localhost:9000. Development only: self-signed Argo certificate. Served by
+# hydrowf-ogc (docs/ogc.md): every job belongs to the bearer token's user, which the service hands to
+# ArgoManager. Under plain `pygeoapi serve` there is no caller, so the catalogue works but job and
 # execute routes refuse (500, NoCaller).
 #
 #   export PYGEOAPI_CONFIG=pygeoapi-config.yml PYGEOAPI_OPENAPI=pygeoapi-openapi.yml
@@ -10,7 +10,7 @@ server:
   bind:
     host: 127.0.0.1
     port: 5000
-  url: ${PYGEOAPI_SERVER_URL:-http://localhost:5000}   # Tethys: http://<host>/ogc
+  url: ${PYGEOAPI_SERVER_URL:-http://localhost:5000}   # the public URL of /ogc: http://<host>/ogc
   mimetype: application/json; charset=UTF-8
   encoding: utf-8
   languages: [en-US]
