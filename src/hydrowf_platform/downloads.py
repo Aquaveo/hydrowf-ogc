@@ -18,9 +18,9 @@ pygeoapi config, under server.manager.connection:
 The keys come from HYDROWF_S3_ACCESS_KEY and HYDROWF_S3_SECRET_KEY, never from the config file;
 a read-only key is enough. Without `downloads`, no links are signed.
 
-pygeoapi builds a new manager for every request under Django, so the client is cached per
-configuration (presigner()), and hydrowf_platform.tethys.settings checks the section when Tethys
-loads its settings: a broken one stops the portal instead of failing every /ogc request.
+The service builds ArgoManager once, at startup (hydrowf_platform.ogc), and the manager checks the
+section there: a broken one stops the service instead of failing every /ogc request. presigner()
+caches the client per configuration.
 """
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def presigner_from(downloads: dict | None) -> Presigner | None:
     access_key = os.environ.get("HYDROWF_S3_ACCESS_KEY")
     secret_key = os.environ.get("HYDROWF_S3_SECRET_KEY")
     if not (endpoint and access_key and secret_key):
-        # A half-configured section is a deployment mistake: tethys.settings turns this into a failed start
+        # A half-configured section is a deployment mistake: the manager is built at startup, so it fails there
         raise ValueError("downloads needs an endpoint, HYDROWF_S3_ACCESS_KEY and HYDROWF_S3_SECRET_KEY")
     return presigner(endpoint, access_key, secret_key,
                      int(downloads.get("expires", 3600)), downloads.get("region", "us-east-1"))

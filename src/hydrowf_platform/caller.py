@@ -1,9 +1,10 @@
-"""Who is calling: the owner id a request acts as, from guard() to ArgoManager.
+"""Who is calling: the owner id a request acts as, from the service (hydrowf_platform.ogc) to ArgoManager.
 
 pygeoapi calls the manager with a job id or a process id, never the request, so the caller travels
-alongside it in a context variable. guard() sets it for the length of one request (acting_as), and
-the manager reads it (owner()). Everything the manager does for a request runs on that request's
-thread: ArgoManager submits synchronously, unlike pygeoapi's own async handler, which starts a thread.
+alongside it in a context variable. The service sets it (acting_as) inside the worker thread that runs
+the request's pygeoapi call, for the length of that call, and the manager reads it (owner()).
+Everything the manager does for a request runs on that thread: ArgoManager submits synchronously,
+unlike pygeoapi's own async handler, which starts a thread of its own.
 
 The owner id is the token's `sub` (Keycloak's user id, a UUID). It becomes the hydrowf/owner label
 on the Argo workflow, so it must be a valid Kubernetes label value.
@@ -22,7 +23,7 @@ _owner: ContextVar[str | None] = ContextVar("hydrowf_owner", default=None)
 
 
 class NoCaller(RuntimeError):
-    """The manager was reached outside a request guard() let through (e.g. under `pygeoapi serve`)."""
+    """The manager was reached outside a request the service let through (e.g. under `pygeoapi serve`)."""
 
 
 def owner_from(claims: dict) -> str | None:
