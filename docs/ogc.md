@@ -142,7 +142,7 @@ so lower bounds for bigger domains):
 
 Set `HYDROWF_OIDC_ISSUER` (the realm URL, e.g. `https://<keycloak>/realms/hydrowf`) and
 `HYDROWF_OIDC_AUDIENCE` (`hydrowf-api`); an issuer without an audience stops the service at startup.
-[auth.py](../src/hydrowf_platform/auth.py) checks the RS256 signature against the realm's keys
+[hydrowf_core.auth](https://github.com/Aquaveo/hydrowf-core/blob/main/src/hydrowf_core/auth.py) checks the RS256 signature against the realm's keys
 (found through OIDC discovery, re-read every 5 minutes), and `iss`, `aud`, `exp` and `sub`, allowing
 30 s of clock skew. The keys are fetched on the first token, in a worker thread like the rest of the
 request.

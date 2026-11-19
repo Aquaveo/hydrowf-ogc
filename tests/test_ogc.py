@@ -1,6 +1,5 @@
 """hydrowf_platform.ogc, the service: the shipped pygeoapi config on Starlette, with a fake Argo and stub keys."""
 import asyncio
-import io
 import json
 import time
 from pathlib import Path
@@ -16,7 +15,8 @@ from pygeoapi.openapi import generate_openapi_document
 from starlette.testclient import TestClient
 from test_manager import DONE, INPUTS, ME, SOMEONE, THEIRS, FakeRuntime
 
-from hydrowf_platform import auth, caller, ogc
+from hydrowf_core import auth
+from hydrowf_platform import caller, ogc
 
 REPO = Path(__file__).parents[1]
 CONFIG = REPO / "pygeoapi-config.yml"
@@ -178,12 +178,6 @@ def test_a_failing_issuer_is_a_server_error(client):
 # ---- startup: settings checked once, before the first request
 
 
-def test_an_issuer_without_an_audience_fails_at_startup():
-    with pytest.raises(auth.AuthConfigError):
-        auth.bearer_from_env({"HYDROWF_OIDC_ISSUER": ISSUER})
-    assert auth.bearer_from_env({}) is None
-
-
 def test_a_bad_manager_config_fails_at_startup(client):
     config = client.app.state.api.config
     config["server"]["manager"]["connection"]["retention"] = {"days": 1.5}
@@ -195,50 +189,6 @@ def test_a_token_whose_key_the_issuer_lacks_is_refused(client):
     unknown_kid = auth.BearerAuth(ISSUER, AUDIENCE, keys=StubKeys(PyJWKClientError("no matching kid")))
     app = ogc.create_app(client.app.state.api.config, client.app.state.api.openapi, unknown_kid)
     assert TestClient(app).get("/ogc/jobs", headers=bearer()).status_code == 401
-
-
-@pytest.mark.parametrize("header, token_", [
-    (None, None),
-    ("Basic dXNlcjpwYXNz", None),          # another scheme: no bearer credential
-    ("Bearer", ""),                        # a bearer header without a token: refused, never anonymous
-    ("bearer  abc ", "abc"),
-])
-def test_bearer_token_only_extracts(header, token_):
-    assert auth.bearer_token(header) == token_
-
-
-# ---- BearerAuth itself: which tokens give claims, and where the keys come from
-
-
-@pytest.mark.parametrize("claims", [
-    {},
-    {"aud": ["account", AUDIENCE]},                       # Keycloak's aud: a list with ours in it
-    {"iat": int(time.time()) + 20},                       # the issuer's clock 20 s ahead: within LEEWAY
-], ids=["plain", "keycloak-aud-list", "clock-skew"])
-def test_valid_tokens_give_their_claims(claims):
-    bearer = auth.BearerAuth(ISSUER + "/", AUDIENCE, keys=StubKeys())    # a trailing slash is dropped
-    assert bearer.claims(token(**claims))["sub"] == ME
-
-
-@pytest.mark.parametrize("claims", [{"iss": "https://evil.test"}, {"sub": None}, {"exp": None}],
-                         ids=["other-issuer", "no-sub", "no-exp"])
-def test_tokens_not_for_us_have_no_claims(claims):
-    assert auth.BearerAuth(ISSUER, AUDIENCE, keys=StubKeys()).claims(token(**claims)) is None
-
-
-def discovery(document):
-    return lambda url, timeout: io.BytesIO(json.dumps(document).encode())
-
-
-def test_discovery_gives_the_jwks_uri(monkeypatch):
-    monkeypatch.setattr(auth, "urlopen", discovery({"issuer": ISSUER, "jwks_uri": f"{ISSUER}/certs"}))
-    assert auth.discover_jwks_uri(ISSUER) == f"{ISSUER}/certs"
-
-
-def test_discovery_must_name_our_issuer(monkeypatch):
-    monkeypatch.setattr(auth, "urlopen", discovery({"issuer": "https://evil.test", "jwks_uri": "x"}))
-    with pytest.raises(auth.AuthConfigError):
-        auth.discover_jwks_uri(ISSUER)
 
 
 # ---- what the review asked for: auth before the body, a bounded body, the OpenAPI document of this run
@@ -333,13 +283,6 @@ def test_authentication_comes_before_the_format_check(client):
 def test_a_bad_token_gets_the_invalid_token_challenge(client):
     response = client.get("/ogc/jobs", headers={"Authorization": "Bearer abc"})
     assert response.headers["WWW-Authenticate"] == 'Bearer error="invalid_token"'
-
-
-def test_a_string_that_is_not_a_jwt_never_asks_the_issuer(monkeypatch):
-    def no_discovery(issuer, timeout=None):
-        raise AssertionError("discovery for a token that isn't a JWT")
-    monkeypatch.setattr(auth, "discover_jwks_uri", no_discovery)
-    assert auth.BearerAuth(ISSUER, AUDIENCE).claims("abc") is None
 
 
 def test_the_openapi_document_names_the_running_url(monkeypatch):
