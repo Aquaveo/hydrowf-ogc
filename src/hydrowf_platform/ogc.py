@@ -4,7 +4,7 @@
 
 Reads PYGEOAPI_CONFIG like pygeoapi does (the OpenAPI document is generated from it at startup, so it
 names the running PYGEOAPI_SERVER_URL), and HYDROWF_OIDC_ISSUER and HYDROWF_OIDC_AUDIENCE for bearer
-tokens (hydrowf_platform.auth; without an issuer, only the open reads work). The routes live under
+tokens (hydrowf_core.auth; without an issuer, only the open reads work). The routes live under
 the path of server.url (http://<host>/ogc serves /ogc/processes etc.), since pygeoapi builds every
 link as server.url + "/processes":
 
@@ -41,7 +41,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
-from hydrowf_platform.auth import BearerAuth, bearer_from_env, bearer_token
+from hydrowf_core.auth import BearerAuth, bearer_from_env, bearer_token
 from hydrowf_platform.caller import acting_as, owner_from
 
 Result = tuple[dict, int, str | bytes]                 # what pygeoapi's API functions return
