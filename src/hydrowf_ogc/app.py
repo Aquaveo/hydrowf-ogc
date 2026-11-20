@@ -11,6 +11,7 @@ pygeoapi builds every link as server.url + "/processes":
     GET    /  /conformance  /openapi  /processes  /processes/{id}   open: anyone may read the catalogue
     POST   /processes/{id}/execution                                 a bearer token: the job is theirs
     GET    /jobs  /jobs/{id}  /jobs/{id}/results                     a bearer token: their jobs only
+    GET    /jobs/{id}/credentials                                    read keys for their job's outputs (no-store)
     DELETE /jobs/{id}
 
 API and its manager are built once, at startup (a bad manager config stops the service there).
@@ -25,6 +26,7 @@ tiles and STAC, and would lose the owner on the way to the manager.
 from __future__ import annotations
 
 import copy
+import logging
 from contextlib import aclosing
 from collections.abc import Callable
 from http import HTTPStatus
@@ -35,6 +37,7 @@ import pygeoapi.api.processes as processes_api
 from pygeoapi.api import API, APIRequest, apply_gzip
 from pygeoapi.config import get_config
 from pygeoapi.openapi import get_oas
+from pygeoapi.process.base import JobNotFoundError, JobResultNotFoundError
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
@@ -43,6 +46,10 @@ from starlette.routing import Route
 
 from hydrowf_core.auth import BearerAuth, bearer_from_env, bearer_token
 from hydrowf_ogc.caller import acting_as, owner_from
+from hydrowf_ogc.credentials import IssuerUnavailable
+from hydrowf_ogc.manager import CredentialsUnavailable
+
+LOGGER = logging.getLogger(__name__)
 
 Result = tuple[dict, int, str | bytes]                 # what pygeoapi's API functions return
 ApiFunction = Callable[..., Result]                    # (api, api_request, *path params) -> Result
@@ -144,6 +151,37 @@ def endpoint(api: API, bearer: BearerAuth | None, functions: dict[str, ApiFuncti
     return handle
 
 
+NO_STORE = {"Content-Type": "application/json", "Cache-Control": "no-store"}
+
+
+def job_credentials(api: API, api_request: APIRequest, job_id: str) -> Result:
+    """GET /jobs/{id}/credentials: read keys for the caller's job's outputs (hydrowf_ogc.credentials).
+    Not pygeoapi's: it has no such route. The route sets no-store on every answer (no_store)."""
+    try:
+        return dict(NO_STORE), HTTPStatus.OK, api.manager.get_job_credentials(job_id)
+    except (JobNotFoundError, JobResultNotFoundError, CredentialsUnavailable) as err:
+        return dict(NO_STORE), HTTPStatus.NOT_FOUND, {"error": str(err)}
+    except IssuerUnavailable as err:                   # STS unreachable or refusing
+        LOGGER.warning("credentials for %s: %s", job_id, err)
+        return dict(NO_STORE), HTTPStatus.SERVICE_UNAVAILABLE, {"error": "read keys can't be issued right now"}
+
+
+def no_store(handle):
+    """`handle` with Cache-Control: no-store on every answer (401s, format errors, server errors too), and
+    GET only: HEAD would issue keys only to drop them, and other methods get this 405 rather than Starlette's."""
+    async def wrapped(request: Request) -> Response:
+        if request.method != "GET":
+            return JSONResponse({"error": "use GET"}, status_code=405, headers={**NO_STORE, "Allow": "GET"})
+        try:
+            response = await handle(request)
+        except Exception:
+            LOGGER.exception("credentials route")
+            response = JSONResponse({"error": "internal error"}, status_code=500)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    return wrapped
+
+
 def create_app(config: dict, openapi: dict, bearer: BearerAuth | None) -> Starlette:
     """The service for a pygeoapi config (its manager is built here, once) and token checker."""
     api = API(config, openapi)
@@ -163,6 +201,8 @@ def create_app(config: dict, openapi: dict, bearer: BearerAuth | None) -> Starle
         route("/jobs", {"GET": processes_api.get_jobs}),
         route("/jobs/{job_id}", {"GET": processes_api.get_jobs, "DELETE": processes_api.delete_job}),
         route("/jobs/{job_id}/results", {"GET": processes_api.get_job_result}),
+        Route(prefix + "/jobs/{job_id}/credentials", no_store(endpoint(api, bearer, {"GET": job_credentials}, False)),
+              methods=["GET", "POST", "PUT", "PATCH", "DELETE"]),      # all answered (and no-store) by no_store
     ])
     app.state.api = api
     return app
