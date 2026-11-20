@@ -19,7 +19,8 @@ pygeoapi config, under server.manager.connection:
       region: us-east-1
 
 The keys come from HYDROWF_S3_ACCESS_KEY and HYDROWF_S3_SECRET_KEY, never from the config file;
-a read-only key is enough (GetObject, and ListBucket for directories). Without `downloads`, no links
+a read-only key is enough (GetObject, and ListBucket for directories; a directory's manifest for its
+STAC Item is read like a listing, `read`). Without `downloads`, no links
 are signed.
 
 The service builds ArgoManager once, at startup (hydrowf_ogc.app), and the manager checks the
@@ -29,6 +30,7 @@ caches the client per configuration.
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 
 import boto3
@@ -36,6 +38,21 @@ from botocore.config import Config
 
 MAX_EXPIRES = 7 * 24 * 3600          # SigV4 rejects longer presigned URLs
 MAX_LISTED = 1000                    # files listed (and linked) per directory output
+# A results request waits on S3 for a listing and a manifest: a slow or unreachable S3 fails it quickly
+# (the links still answer) instead of holding the request for botocore's 60 s x retries.
+S3_TIMEOUTS = {"connect_timeout": 5, "read_timeout": 15, "retries": {"max_attempts": 2, "mode": "standard"}}
+KEY_CHARS = re.compile(r"[A-Za-z0-9._/-]+")   # no {{ }}: Argo expands them in the artifact key it reads
+
+
+def clean_key(key: str) -> bool:
+    """A prefix match on the text means the same key to Argo and the store: plain characters only, and
+    no empty, `.` or `..` part."""
+    return bool(KEY_CHARS.fullmatch(key)) and all(
+        part not in ("", ".", "..") for part in key.removesuffix("/").split("/"))
+
+
+class TooLarge(ValueError):
+    """An object over the size Presigner.read was given."""
 
 
 def split_s3_url(url: str) -> tuple[str, str]:
@@ -59,7 +76,7 @@ class Presigner:
                 "s3", endpoint_url=at, region_name=region,
                 aws_access_key_id=access_key, aws_secret_access_key=secret_key,
                 # path style (host/bucket/key): MinIO, RustFS and an ingress don't serve bucket subdomains
-                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}, **S3_TIMEOUTS),
             )
         self.client = client(endpoint)                   # signs links for the address clients use
         self.lister = client(internal_endpoint) if internal_endpoint else self.client
@@ -76,6 +93,19 @@ class Presigner:
             found += [(obj["Key"][len(prefix):], obj["Size"]) for obj in page.get("Contents", [])
                       if not obj["Key"].endswith("/")]      # a "folder" marker some tools write: not a file
         return found[:limit], len(found) > limit
+
+    def read(self, s3_url: str, max_bytes: int) -> bytes:
+        """The object's bytes, read like a listing (internal endpoint); TooLarge when it is over
+        `max_bytes`. Only max_bytes + 1 bytes are asked for, so a huge object costs no more than that."""
+        bucket, key = split_s3_url(s3_url)
+        body = self.lister.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{max_bytes}")["Body"]
+        try:
+            data = body.read(max_bytes + 1)
+        finally:
+            body.close()
+        if len(data) > max_bytes:
+            raise TooLarge(f"{s3_url} is over {max_bytes} bytes")
+        return data
 
     def url(self, s3_url: str) -> str:
         """A GET URL for the object, valid for `expires` seconds."""

@@ -45,19 +45,23 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
+import yaml
 from botocore.exceptions import BotoCoreError, ClientError
 from hera.exceptions import NotFound
+from pydantic import ValidationError
 from pygeoapi.process.base import (BaseProcessor, JobNotFoundError, JobResultNotFoundError,
                                    ProcessorExecuteError, UnknownProcessError)
 from pygeoapi.process.manager.base import BaseManager
 from pygeoapi.util import DATETIME_FORMAT, JobStatus
 
-from hydrowf_core.adapters.argo import FILE_TYPES, MAX_KEEP_DAYS, BadInputs, UnsupportedForArgo, render
+from hydrowf_core.adapters.argo import FILE_TYPES, MAX_KEEP_DAYS, BadInputs, UnsupportedForArgo, render, semver
 from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
-from hydrowf_ogc import caller
-from hydrowf_ogc.downloads import Presigner, presigner_from, split_s3_url
+from hydrowf_core.models import Pipeline
+from hydrowf_core.models.lego import DataLego, Lego, StacStorage, ToolLego
+from hydrowf_ogc import caller, stac
+from hydrowf_ogc.downloads import Presigner, TooLarge, clean_key, presigner_from, split_s3_url
 from hydrowf_ogc.processor import PipelineProcessor
-from hydrowf_ogc.registry import RegistryProcesses, RemoteRegistry
+from hydrowf_ogc.registry import RegistryError, RegistryProcesses, RemoteRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -152,14 +156,6 @@ def result_link(s3_url: str, presigner: Presigner | None) -> dict:
 
 
 COMPRESSED = {"gzip": "application/gzip", "bzip2": "application/x-bzip2", "xz": "application/x-xz"}
-KEY_CHARS = re.compile(r"[A-Za-z0-9._/-]+")   # no {{ }}: Argo expands them in the artifact key it reads
-
-
-def clean_key(key: str) -> bool:
-    """A prefix match on the text means the same key to Argo and the store: plain characters only, and
-    no empty, `.` or `..` part."""
-    return bool(KEY_CHARS.fullmatch(key)) and all(
-        part not in ("", ".", "..") for part in key.removesuffix("/").split("/"))
 
 
 KEEP_DAYS = 30
@@ -349,11 +345,102 @@ class ArgoManager(BaseManager):
         return {"jobs": jobs[start:start + limit] if limit else jobs[start:], "numberMatched": len(jobs)}
 
     def get_job_result(self, job_id: str) -> tuple[str, Any]:
+        """A link per output (result_link); a directory output whose data lego is `driver: stac` with
+        `item_from` also gets its STAC `item`, or an `item_error` saying why there is none."""
         run = self._run(job_id)
         if run.phase != "Succeeded":
             raise JobResultNotFoundError(f"job {job_id} is {run.phase}")
-        return MIMETYPE, {name: result_link(url, self.presigner)
-                          for name, url in self.runtime.outputs(job_id).items()}
+        outputs = self.runtime.outputs(job_id)
+        data = self.output_data(run) if self.presigner and any(u.endswith("/") for u in outputs.values()) else {}
+        results = {}
+        for name, url in outputs.items():
+            results[name] = result_link(url, self.presigner)
+            if name in data and url.endswith("/"):
+                results[name].update(self.item_for(run, name, url, data[name]))
+        return MIMETYPE, results
+
+    def pipeline_legos(self, pipeline_id: str, version: str) -> tuple[Pipeline, list[Lego]] | None:
+        """The pipeline a run was rendered from (its hydrowf/pipeline and hydrowf/version labels) and the
+        legos it was checked with; None when it is no longer offered."""
+        if self.registry:
+            try:
+                snapshot = self.registry.snapshot()
+            except RegistryError as err:            # never read yet: results still answer, without Items
+                LOGGER.warning("no registry for %s@%s: %s", pipeline_id, version, err)
+                return None
+            pipeline = snapshot.processes.get(f"{pipeline_id}@{version}")
+            return (pipeline, snapshot.legos) if pipeline else None
+        for process_id, conf in self.processes.items():   # the config's resources: build only the match
+            ref = (conf.get("processor") or {}).get("pipeline") or {}
+            if (ref.get("id"), str(ref.get("version"))) != (pipeline_id, version):
+                continue
+            try:
+                p = self.get_processor(process_id)
+            except (OSError, yaml.YAMLError, RegistryError, ValidationError) as err:   # a broken registry file
+                LOGGER.warning("process %s: %s", process_id, err)
+                return None
+            return (p.pipeline, p.legos) if isinstance(p, PipelineProcessor) else None
+        return None
+
+    def output_data(self, run: RunStatus) -> dict[str, DataLego]:
+        """Pipeline output name -> its data lego, for the outputs whose data has STAC storage with
+        `item_from`: output -> step -> the tool's output port -> its `data`, at the latest version of it with
+        STAC storage (as render() picks `archive`), read now: a newer version than the job ran with
+        decides its Item."""
+        found = self.pipeline_legos(run.pipeline, run.labels.get("hydrowf/version", ""))
+        if found is None:
+            return {}
+        pipeline, legos = found
+        tools = {(x.id, x.version): x for x in legos if isinstance(x, ToolLego)}
+        latest: dict[str, DataLego] = {}
+        for lego in legos:
+            if not (isinstance(lego, DataLego) and isinstance(lego.storage, StacStorage)):
+                continue
+            if lego.id not in latest or semver(lego.version) > semver(latest[lego.id].version):
+                latest[lego.id] = lego
+        steps = {s.name: s for s in pipeline.steps}
+        data = {}
+        for name, link in pipeline.outputs.items():
+            tool = tools.get(steps[link.step].tool.key())
+            port = next((p for p in tool.outputs if p.name == link.output), None) if tool else None
+            lego = latest.get(port.data) if port and port.data else None
+            if lego and lego.storage.item_from:
+                data[name] = lego
+        return data
+
+    def item_for(self, run: RunStatus, name: str, url: str, lego: DataLego) -> dict:
+        """{"item": <STAC Item>} for the directory output `url`, or {"item_error": <why not>}."""
+        manifest_path = lego.storage.item_from
+        try:
+            stac.relative_key(manifest_path)
+        except ValueError:
+            return {"item_error": f"{lego.id}@{lego.version}: item_from {manifest_path!r} is not a path"}
+        try:
+            raw = self.presigner.read(url + manifest_path, stac.MAX_MANIFEST)
+        except ClientError as err:
+            code = err.response.get("Error", {}).get("Code")
+            if code in ("NoSuchKey", "404"):
+                return {"item_error": f"the output has no {manifest_path}"}
+            if code == "InvalidRange":             # bytes=0-N of an empty object
+                return {"item_error": f"{manifest_path} is not a manifest: it is empty"}
+            LOGGER.warning("reading %s%s: %s", url, manifest_path, err)
+            return {"item_error": f"{manifest_path} can't be read right now"}
+        except BotoCoreError as err:
+            LOGGER.warning("reading %s%s: %s", url, manifest_path, err)
+            return {"item_error": f"{manifest_path} can't be read right now"}
+        except TooLarge:
+            return {"item_error": f"{manifest_path} is over {stac.MAX_MANIFEST} bytes"}
+        try:
+            manifest = stac.Manifest.model_validate_json(raw)
+            return {"item": stac.item(job_id=run.name, output=name, s3_url=url, data=f"{lego.id}@{lego.version}",
+                                      manifest=manifest, manifest_path=manifest_path,
+                                      finished_at=run.finished_at, presigner=self.presigner)}
+        except ValidationError as err:
+            first = err.errors()[0]
+            where = ".".join(str(part) for part in first["loc"]) or "manifest"
+            return {"item_error": f"{manifest_path} is not a manifest: {where}: {first['msg']}"}
+        except ValueError as err:
+            return {"item_error": str(err)}
 
     def delete_job(self, job_id: str) -> bool:
         self._run(job_id)                          # only the caller's own
