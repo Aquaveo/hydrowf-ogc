@@ -16,14 +16,14 @@ from pygeoapi.config import get_config
 from pygeoapi.openapi import get_oas
 from starlette.testclient import TestClient
 from test_manager import INPUTS, ME, FakeRuntime
-from test_ogc import AUDIENCE, ISSUER, URL, StubKeys, token
+from test_app import AUDIENCE, ISSUER, URL, StubKeys, token
 
 from hydrowf_core.auth import BearerAuth
 from hydrowf_core.models import LEGOS
-from hydrowf_platform import ogc
-from hydrowf_platform.manager import registry_from
-from hydrowf_platform import registry as registry_module
-from hydrowf_platform.registry import RegistryError, RemoteRegistry, fetch_public_legos
+from hydrowf_ogc import app as service
+from hydrowf_ogc.manager import registry_from
+from hydrowf_ogc import registry as registry_module
+from hydrowf_ogc.registry import RegistryError, RemoteRegistry, fetch_public_legos
 
 REPO = Path(__file__).parents[1]
 CONFIG = REPO / "pygeoapi-config.yml"
@@ -157,7 +157,7 @@ def client(fake, runtime, monkeypatch):
     manager["runtime"], manager["registry_fetch"] = runtime, fake
     manager["connection"]["registry"] = {"url": "http://registry.test", "ttl": 1}
     config["resources"] = {}                                   # nothing from the config: all from the registry
-    app = ogc.create_app(config, get_oas(copy.deepcopy(config)), BearerAuth(ISSUER, AUDIENCE, keys=StubKeys()))
+    app = service.create_app(config, get_oas(copy.deepcopy(config)), BearerAuth(ISSUER, AUDIENCE, keys=StubKeys()))
     return TestClient(app, base_url="http://testserver")
 
 

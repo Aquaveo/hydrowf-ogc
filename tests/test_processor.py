@@ -5,11 +5,11 @@ from pygeoapi.process.base import ProcessorExecuteError
 
 from hydrowf_core.adapters.argo import BadInputs, render
 from hydrowf_core.adapters.ogc import process_description
-from hydrowf_platform.processor import PipelineProcessor
-from hydrowf_platform.registry import RegistryError, find_pipeline, load_legos
+from hydrowf_ogc.processor import PipelineProcessor
+from hydrowf_ogc.registry import RegistryError, find_pipeline, load_legos
 
 REGISTRY = Path(__file__).parent / "fixtures" / "legos.yaml"
-SIMULATION = {"name": "hydrowf_platform.processor.PipelineProcessor", "registry": str(REGISTRY),
+SIMULATION = {"name": "hydrowf_ogc.processor.PipelineProcessor", "registry": str(REGISTRY),
               "pipeline": {"id": "ngiab-simulation", "version": "0.1.0"}}
 
 

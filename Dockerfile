@@ -1,4 +1,4 @@
-# hydrowf-ogc: the OGC API - Processes service (hydrowf_platform.ogc) on uvicorn, port 8000.
+# hydrowf-ogc: the OGC API - Processes service (hydrowf_ogc.app) on uvicorn, port 8000.
 #
 #   docker build -t hydrowf-ogc .                                   # from the repository root
 #   docker run --rm -p 8000:8000 -e HYDROWF_OIDC_ISSUER=... -e HYDROWF_OIDC_AUDIENCE=... hydrowf-ogc
@@ -44,5 +44,5 @@ ENV PATH=/opt/venv/bin:$PATH \
 WORKDIR /opt/hydrowf
 USER 10001
 EXPOSE 8000
-CMD ["uvicorn", "--factory", "hydrowf_platform.ogc:app_from_env", "--host", "0.0.0.0", "--port", "8000", \
+CMD ["uvicorn", "--factory", "hydrowf_ogc.app:app_from_env", "--host", "0.0.0.0", "--port", "8000", \
      "--proxy-headers"]

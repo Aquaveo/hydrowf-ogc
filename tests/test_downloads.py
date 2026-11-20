@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from hydrowf_platform.downloads import MAX_EXPIRES, Presigner, presigner_from, split_s3_url
+from hydrowf_ogc.downloads import MAX_EXPIRES, Presigner, presigner_from, split_s3_url
 
 KEY = "job-1/job-1-step-run-1/ngen-run.tgz"
 KEYS = {"HYDROWF_S3_ACCESS_KEY": "reader", "HYDROWF_S3_SECRET_KEY": "secret"}

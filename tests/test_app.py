@@ -1,4 +1,4 @@
-"""hydrowf_platform.ogc, the service: the shipped pygeoapi config on Starlette, with a fake Argo and stub keys."""
+"""hydrowf_ogc.app, the service: the shipped pygeoapi config on Starlette, with a fake Argo and stub keys."""
 import asyncio
 import json
 import time
@@ -16,7 +16,7 @@ from starlette.testclient import TestClient
 from test_manager import DONE, INPUTS, ME, SOMEONE, THEIRS, FakeRuntime
 
 from hydrowf_core import auth
-from hydrowf_platform import caller, ogc
+from hydrowf_ogc import app as service, caller
 
 REPO = Path(__file__).parents[1]
 CONFIG = REPO / "pygeoapi-config.yml"
@@ -63,7 +63,7 @@ def client(runtime, monkeypatch):
     config = get_config()
     config["server"]["manager"]["runtime"] = runtime              # ArgoManager takes a runtime from its config
     openapi = yaml.safe_load(generate_openapi_document(CONFIG, "yaml"))
-    app = ogc.create_app(config, openapi, auth.BearerAuth(ISSUER, AUDIENCE, keys=StubKeys()))
+    app = service.create_app(config, openapi, auth.BearerAuth(ISSUER, AUDIENCE, keys=StubKeys()))
     return TestClient(app, base_url="http://testserver")
 
 
@@ -121,7 +121,7 @@ def test_other_schemes_are_no_credential(client):
 
 
 def test_without_an_issuer_jobs_are_closed(client):
-    app = ogc.create_app(client.app.state.api.config, client.app.state.api.openapi, bearer=None)
+    app = service.create_app(client.app.state.api.config, client.app.state.api.openapi, bearer=None)
     closed = TestClient(app, base_url="http://testserver")
     assert closed.get("/ogc/processes").status_code == 200
     assert closed.get("/ogc/jobs", headers=bearer()).status_code == 401
@@ -170,7 +170,7 @@ def test_the_owner_does_not_outlive_its_request(client):
 
 def test_a_failing_issuer_is_a_server_error(client):
     failing = auth.BearerAuth(ISSUER, AUDIENCE, keys=StubKeys(PyJWKClientConnectionError("down")))
-    app = ogc.create_app(client.app.state.api.config, client.app.state.api.openapi, failing)
+    app = service.create_app(client.app.state.api.config, client.app.state.api.openapi, failing)
     with pytest.raises(PyJWKClientConnectionError):         # TestClient re-raises what would be a 500
         TestClient(app).get("/ogc/jobs", headers=bearer())
 
@@ -182,12 +182,12 @@ def test_a_bad_manager_config_fails_at_startup(client):
     config = client.app.state.api.config
     config["server"]["manager"]["connection"]["retention"] = {"days": 1.5}
     with pytest.raises(ValueError):
-        ogc.create_app(config, client.app.state.api.openapi, None)
+        service.create_app(config, client.app.state.api.openapi, None)
 
 
 def test_a_token_whose_key_the_issuer_lacks_is_refused(client):
     unknown_kid = auth.BearerAuth(ISSUER, AUDIENCE, keys=StubKeys(PyJWKClientError("no matching kid")))
-    app = ogc.create_app(client.app.state.api.config, client.app.state.api.openapi, unknown_kid)
+    app = service.create_app(client.app.state.api.config, client.app.state.api.openapi, unknown_kid)
     assert TestClient(app).get("/ogc/jobs", headers=bearer()).status_code == 401
 
 
@@ -217,7 +217,7 @@ def test_an_anonymous_caller_is_refused_before_its_body_is_read(client):
 
     async def receive():                                   # a spy: records each ask for the body
         asked.append(True)
-        return {"type": "http.request", "body": b"x" * (ogc.MAX_BODY + 1), "more_body": False}
+        return {"type": "http.request", "body": b"x" * (service.MAX_BODY + 1), "more_body": False}
 
     assert asgi(client.app, "POST", EXECUTE, {}, receive) == 401 and asked == []
 
@@ -230,11 +230,11 @@ def test_reading_stops_once_the_body_passes_max_body(client):
         return {"type": "http.request", "body": b"x" * 65536, "more_body": True}
 
     assert asgi(client.app, "POST", EXECUTE, bearer(), receive) == 413
-    assert len(asked) <= ogc.MAX_BODY // 65536 + 2         # not read to the end, then measured
+    assert len(asked) <= service.MAX_BODY // 65536 + 2         # not read to the end, then measured
 
 
 def test_a_body_over_max_body_is_refused(client, runtime):
-    response = client.post("/ogc/processes/ngiab-simulation/execution", content=b"x" * (ogc.MAX_BODY + 1),
+    response = client.post("/ogc/processes/ngiab-simulation/execution", content=b"x" * (service.MAX_BODY + 1),
                            headers={**bearer(), "Content-Type": "application/json"})
     assert response.status_code == 413 and runtime.submitted == []
 
@@ -247,13 +247,13 @@ def test_a_chunked_body_is_read(client, runtime):           # no Content-Length:
 
 
 def test_a_chunked_body_over_max_body_is_refused(client, runtime):
-    chunks = (b"x" * 65536 for _ in range(ogc.MAX_BODY // 65536 + 1))
+    chunks = (b"x" * 65536 for _ in range(service.MAX_BODY // 65536 + 1))
     response = client.post("/ogc/processes/ngiab-simulation/execution", content=chunks, headers=bearer())
     assert response.status_code == 413 and runtime.submitted == []
 
 
 def test_a_lying_content_length_is_not_trusted(client, runtime):
-    chunks = (b"x" * 65536 for _ in range(ogc.MAX_BODY // 65536 + 1))      # declares 10 bytes, sends more
+    chunks = (b"x" * 65536 for _ in range(service.MAX_BODY // 65536 + 1))      # declares 10 bytes, sends more
     response = client.post("/ogc/processes/ngiab-simulation/execution", content=chunks,
                            headers={**bearer(), "Content-Length": "10"})
     assert response.status_code == 413 and runtime.submitted == []
@@ -271,7 +271,7 @@ def test_only_a_post_body_is_read(client, method, path, headers):
 
     async def receive():
         asked.append(True)
-        return {"type": "http.request", "body": b"x" * (ogc.MAX_BODY + 1), "more_body": False}
+        return {"type": "http.request", "body": b"x" * (service.MAX_BODY + 1), "more_body": False}
 
     assert asgi(client.app, method, path, headers, receive) in (200, 204) and asked == []
 
@@ -290,6 +290,6 @@ def test_the_openapi_document_names_the_running_url(monkeypatch):
     monkeypatch.setenv("PYGEOAPI_SERVER_URL", "https://hydrowf.example/ogc")
     monkeypatch.setenv("HYDROWF_REGISTRY", str(REPO / "registry" / "legos.yaml"))
     monkeypatch.delenv("HYDROWF_OIDC_ISSUER", raising=False)
-    app = ogc.app_from_env()
+    app = service.app_from_env()
     assert app.state.api.openapi["servers"][0]["url"] == "https://hydrowf.example/ogc"
     assert TestClient(app).get("/ogc/processes").status_code == 200

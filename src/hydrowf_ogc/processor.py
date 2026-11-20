@@ -9,7 +9,7 @@ pygeoapi config:
       ngiab-simulation:
         type: process
         processor:
-          name: hydrowf_platform.processor.PipelineProcessor
+          name: hydrowf_ogc.processor.PipelineProcessor
           registry: registry/legos.yaml
           pipeline: {id: ngiab-simulation, version: 0.1.0}
 
@@ -23,7 +23,7 @@ from pygeoapi.process.base import BaseProcessor, ProcessorExecuteError
 from hydrowf_core.adapters.ogc import process_description
 from hydrowf_core.models import Pipeline
 from hydrowf_core.models.lego import Lego
-from hydrowf_platform.registry import find_pipeline, load_legos
+from hydrowf_ogc.registry import find_pipeline, load_legos
 
 
 class PipelineProcessor(BaseProcessor):
@@ -44,7 +44,7 @@ class PipelineProcessor(BaseProcessor):
         return processor
 
     def execute(self, data: dict, outputs: dict | None = None):
-        raise ProcessorExecuteError(user_msg="pipelines run through hydrowf_platform.manager.ArgoManager")
+        raise ProcessorExecuteError(user_msg="pipelines run through hydrowf_ogc.manager.ArgoManager")
 
     def __repr__(self):
         return f"<PipelineProcessor> {self.pipeline.id}@{self.pipeline.version}"

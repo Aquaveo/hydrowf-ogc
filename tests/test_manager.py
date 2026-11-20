@@ -10,14 +10,14 @@ from pygeoapi.process.base import JobNotFoundError, JobResultNotFoundError
 from pygeoapi.util import JobStatus
 
 from hydrowf_core.adapters.argo_runtime import RunStatus
-from hydrowf_platform import caller
-from hydrowf_platform.downloads import Presigner
-from hydrowf_platform.manager import (ArgoManager, BadExecuteRequest, ForbiddenInput, job_dict, keep_days,
-                                      shared_prefixes)
+from hydrowf_ogc import caller
+from hydrowf_ogc.downloads import Presigner
+from hydrowf_ogc.manager import (ArgoManager, BadExecuteRequest, ForbiddenInput, job_dict, keep_days,
+                                 shared_prefixes)
 
 REGISTRY = Path(__file__).parent / "fixtures" / "legos.yaml"
 PROCESSOR = {
-    "name": "hydrowf_platform.processor.PipelineProcessor",
+    "name": "hydrowf_ogc.processor.PipelineProcessor",
     "registry": str(REGISTRY),
     "pipeline": {"id": "ngiab-simulation", "version": "0.1.0"},
 }
@@ -75,7 +75,7 @@ class FakeRuntime:
 def manager(runtime=None, presigner=None, **connection):
     return ArgoManager(
         {
-            "name": "hydrowf_platform.manager.ArgoManager",
+            "name": "hydrowf_ogc.manager.ArgoManager",
             "runtime": runtime or FakeRuntime(),
             "presigner": presigner,
             "connection": {
@@ -386,7 +386,7 @@ def test_the_downloads_section_turns_presigning_on(monkeypatch):
     monkeypatch.setenv("HYDROWF_S3_SECRET_KEY", "secret")
     url = "s3://my-bucket/job-done/job-done-step-run-1/ngen-run.tgz"
     m = ArgoManager({                       # the path a pygeoapi config takes: connection.downloads
-        "name": "hydrowf_platform.manager.ArgoManager",
+        "name": "hydrowf_ogc.manager.ArgoManager",
         "runtime": FakeRuntime([DONE], outputs={"job-done": {"run": url}}),
         "connection": {"bucket": "my-bucket", "downloads": {"endpoint": "https://s3.example.org"}},
     })
