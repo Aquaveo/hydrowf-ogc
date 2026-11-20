@@ -4,7 +4,7 @@ The manager keeps no job state. Executing a process renders the pipeline lego an
 named after pygeoapi's job id (so job id = workflow name = the run's {run}). Every other call reads
 Argo through hydrowf_core's ArgoRuntime: a job's status is the workflow's phase, the job list is the
 workflows render() labelled, results are links to the pipeline's outputs (presigned when configured).
-Every run belongs to the caller who submitted it (the hydrowf/owner label, hydrowf_platform.caller):
+Every run belongs to the caller who submitted it (the hydrowf/owner label, hydrowf_ogc.caller):
 the caller sees, reads and dismisses only their own, and passes as file or directory inputs only
 their own jobs' outputs or keys under a shared prefix (check_inputs). Any pygeoapi worker can answer
 for any job, and a restart loses nothing.
@@ -13,7 +13,7 @@ pygeoapi config:
 
     server:
       manager:
-        name: hydrowf_platform.manager.ArgoManager
+        name: hydrowf_ogc.manager.ArgoManager
         connection:                                # pygeoapi's "where jobs are stored": Argo
           host: https://argo-server.argo:2746     # or HYDROWF_ARGO_HOST
           namespace: argo
@@ -52,10 +52,10 @@ from pygeoapi.util import DATETIME_FORMAT, JobStatus
 
 from hydrowf_core.adapters.argo import FILE_TYPES, MAX_KEEP_DAYS, BadInputs, UnsupportedForArgo, render
 from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
-from hydrowf_platform import caller
-from hydrowf_platform.downloads import Presigner, presigner_from, split_s3_url
-from hydrowf_platform.processor import PipelineProcessor
-from hydrowf_platform.registry import RegistryProcesses, RemoteRegistry
+from hydrowf_ogc import caller
+from hydrowf_ogc.downloads import Presigner, presigner_from, split_s3_url
+from hydrowf_ogc.processor import PipelineProcessor
+from hydrowf_ogc.registry import RegistryProcesses, RemoteRegistry
 
 LOGGER = logging.getLogger(__name__)
 

@@ -173,7 +173,7 @@
   storage: {driver: stac, format: other}
 
 # From hydrowf-tools nextgen/ngiab-to-cng. `command` repeats its ENTRYPOINT, so Argo's emissary
-# doesn't have to ask the registry for it (hydrowf-platform docs/argo-findings.md).
+# doesn't have to ask the registry for it (hydrowf-ogc docs/argo-findings.md).
 - kind: tool
   id: ngiab-to-cng
   version: 0.1.0

@@ -1,4 +1,4 @@
-"""Who is calling: the owner id a request acts as, from the service (hydrowf_platform.ogc) to ArgoManager.
+"""Who is calling: the owner id a request acts as, from the service (hydrowf_ogc.app) to ArgoManager.
 
 pygeoapi calls the manager with a job id or a process id, never the request, so the caller travels
 alongside it in a context variable. The service sets it (acting_as) inside the worker thread that runs

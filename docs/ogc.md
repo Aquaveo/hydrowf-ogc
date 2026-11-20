@@ -1,7 +1,7 @@
 # hydrowf-ogc: the OGC API - Processes service
 
 pygeoapi's Processes and Jobs endpoints as a standalone service: a small Starlette app
-([ogc.py](../src/hydrowf_platform/ogc.py)) on uvicorn, in front of pygeoapi's API and ArgoManager.
+([app.py](../src/hydrowf_ogc/app.py)) on uvicorn, in front of pygeoapi's API and ArgoManager.
 Clients (the Tethys client app, the CLI, notebooks, the agent) call it with a Keycloak access token.
 
 ```
@@ -41,7 +41,7 @@ The image bakes in [pygeoapi-config.yml](../pygeoapi-config.yml), which is the *
 | `FORWARDED_ALLOW_IPS` | The ingress addresses whose `X-Forwarded-*` headers uvicorn trusts (`--proxy-headers`) |
 
 Job results are `s3://` links unless the manager config has a `downloads` section
-([downloads.py](../src/hydrowf_platform/downloads.py)); with it, each result's `href` is a presigned
+([downloads.py](../src/hydrowf_ogc/downloads.py)); with it, each result's `href` is a presigned
 HTTPS GET that expires, and `s3` keeps the address another pipeline takes as an input (a read-only
 key is enough). On kind, mount a copy of the config with `downloads: {endpoint: http://localhost:9000}`
 and port-forward `svc/minio` to 9000. Only the service keeps those links from anonymous callers, so
@@ -55,7 +55,7 @@ runs with.
 ## Processes from the registry
 
 With `connection.registry: {url, ttl}` in the manager config (or `HYDROWF_REGISTRY_URL`), the processes
-are hydrowf-registry's public pipelines ([registry.py](../src/hydrowf_platform/registry.py)): each
+are hydrowf-registry's public pipelines ([registry.py](../src/hydrowf_ogc/registry.py)): each
 version as `<id>@<version>` (e.g. `ngiab-simulation@0.1.0`) and `<id>` as its latest version. The service
 reads `GET /legos` once per `ttl` seconds (default 60). A lego that doesn't validate with this
 hydrowf-core, or a pipeline whose tools aren't public, is left out and logged. If the registry can't be
@@ -103,7 +103,7 @@ Each run belongs to the token's `sub`: execute labels the Argo workflow `hydrowf
 job list shows only the caller's runs, and another caller's job (or a run from before owners, with
 no label) is `404` on read, results and dismiss, as if it didn't exist. pygeoapi never passes the
 request to the manager, so the service hands the owner over in a context variable
-([caller.py](../src/hydrowf_platform/caller.py)), set inside the worker thread that runs the call. A
+([caller.py](../src/hydrowf_ogc/caller.py)), set inside the worker thread that runs the call. A
 middleware in front of pygeoapi's own Starlette app would not work: it calls the API through
 `loop.run_in_executor`, which does not carry context variables into its threads. A manager reached
 without an owner (e.g. under `pygeoapi serve`) refuses.

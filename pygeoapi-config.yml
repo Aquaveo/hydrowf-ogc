@@ -21,7 +21,7 @@ server:
     url: https://tile.openstreetmap.org/{z}/{x}/{y}.png
     attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap contributors</a>'
   manager:
-    name: hydrowf_platform.manager.ArgoManager
+    name: hydrowf_ogc.manager.ArgoManager
     connection:
       host: https://localhost:2746
       namespace: argo
@@ -40,7 +40,7 @@ metadata:
     title: hydrowf
     description: hydrowf pipelines as OGC API - Processes, run on Argo Workflows
     keywords: [hydrology, nextgen, workflows]
-    url: https://github.com/Aquaveo/hydrowf-platform
+    url: https://github.com/Aquaveo/hydrowf-ogc
     terms_of_service: https://creativecommons.org/licenses/by/4.0/   # optional in the schema, required by openapi generate
   license:
     name: CC-BY 4.0 license
@@ -55,12 +55,12 @@ resources:
   ngiab-simulation:
     type: process
     processor:
-      name: hydrowf_platform.processor.PipelineProcessor
+      name: hydrowf_ogc.processor.PipelineProcessor
       registry: ${HYDROWF_REGISTRY:-registry/legos.yaml}   # relative to the working directory
       pipeline: {id: ngiab-simulation, version: 0.1.0}
   ngiab-calibration:
     type: process
     processor:
-      name: hydrowf_platform.processor.PipelineProcessor
+      name: hydrowf_ogc.processor.PipelineProcessor
       registry: ${HYDROWF_REGISTRY:-registry/legos.yaml}
       pipeline: {id: ngiab-calibration, version: 0.1.0}

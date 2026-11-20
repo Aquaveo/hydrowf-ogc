@@ -167,7 +167,7 @@
 
 # From hydrowf-tools nextgen/ngiab-to-cng/ngiab-to-cng.cwl. The image is only built locally, so
 # `command` repeats its ENTRYPOINT: Argo's emissary asks the registry otherwise, and a registry
-# can't describe a local image (hydrowf-platform docs/argo-findings.md).
+# can't describe a local image (hydrowf-ogc docs/argo-findings.md).
 - kind: tool
   id: ngiab-to-cng
   version: 0.1.0

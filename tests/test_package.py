@@ -1,5 +1,5 @@
-import hydrowf_platform
+import hydrowf_ogc
 
 
 def test_package_imports():
-    assert hydrowf_platform.__doc__
+    assert hydrowf_ogc.__doc__

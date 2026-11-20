@@ -1,6 +1,6 @@
 """hydrowf-ogc: the OGC API - Processes as a service, pygeoapi's Processes and Jobs on Starlette.
 
-    uvicorn --factory hydrowf_platform.ogc:app_from_env --host 0.0.0.0 --port 8000 --proxy-headers
+    uvicorn --factory hydrowf_ogc.app:app_from_env --host 0.0.0.0 --port 8000 --proxy-headers
 
 Reads PYGEOAPI_CONFIG like pygeoapi does (the OpenAPI document is generated from it at startup, so it
 names the running PYGEOAPI_SERVER_URL, and the processes of that moment), and HYDROWF_OIDC_ISSUER and
@@ -16,7 +16,7 @@ pygeoapi builds every link as server.url + "/processes":
 API and its manager are built once, at startup (a bad manager config stops the service there).
 A request is authenticated before anything else is read; only a POST's body is read at all, counted as
 it streams in and refused past MAX_BODY bytes (no header is trusted for its size). Every request
-runs pygeoapi's handler in a worker thread, as the token's owner (hydrowf_platform.caller): the
+runs pygeoapi's handler in a worker thread, as the token's owner (hydrowf_ogc.caller): the
 owner is handed to the thread, not left in a context variable, because pygeoapi's own Starlette app
 (loop.run_in_executor) does not carry context variables into its threads. That is also why this is
 not pygeoapi.starlette_app with a middleware in front: it builds its API at import, serves collections,
@@ -42,7 +42,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from hydrowf_core.auth import BearerAuth, bearer_from_env, bearer_token
-from hydrowf_platform.caller import acting_as, owner_from
+from hydrowf_ogc.caller import acting_as, owner_from
 
 Result = tuple[dict, int, str | bytes]                 # what pygeoapi's API functions return
 ApiFunction = Callable[..., Result]                    # (api, api_request, *path params) -> Result

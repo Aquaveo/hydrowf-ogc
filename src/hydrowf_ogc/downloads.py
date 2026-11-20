@@ -18,7 +18,7 @@ pygeoapi config, under server.manager.connection:
 The keys come from HYDROWF_S3_ACCESS_KEY and HYDROWF_S3_SECRET_KEY, never from the config file;
 a read-only key is enough. Without `downloads`, no links are signed.
 
-The service builds ArgoManager once, at startup (hydrowf_platform.ogc), and the manager checks the
+The service builds ArgoManager once, at startup (hydrowf_ogc.app), and the manager checks the
 section there: a broken one stops the service instead of failing every /ogc request. presigner()
 caches the client per configuration.
 """
