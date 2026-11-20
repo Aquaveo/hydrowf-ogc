@@ -172,6 +172,15 @@
   data_kind: output
   storage: {driver: stac, format: other}
 
+# 2.0.0: also carries the run inputs as they are (run/), so cng-to-ngen can rebuild a run folder that
+# reruns exactly (hydrowf-tools nextgen/cng-to-ngen; ngiab-to-cng 0.3.0 and later)
+- kind: data
+  id: ngen-cng
+  version: 2.0.0
+  title: NGIAB run as cloud-native files, rerunnable (Parquet, Zarr, COG, run/, manifest.json)
+  data_kind: output
+  storage: {driver: stac, format: other}
+
 # From hydrowf-tools nextgen/ngiab-to-cng. `command` repeats its ENTRYPOINT, so Argo's emissary
 # doesn't have to ask the registry for it (hydrowf-ogc docs/argo-findings.md).
 - kind: tool
@@ -196,6 +205,47 @@
     - {name: cng, type: directory, data: ngen-cng, path: ngen-run_cng}
   cpu: 1
   ram_mb: 2048
+
+# 0.3.0: manifest 0.3 with bbox, period and `rerun`; copies the run inputs as they are into run/
+- kind: tool
+  id: ngiab-to-cng
+  version: 0.3.0
+  title: NGIAB run to cloud-native files, rerunnable
+  image: ghcr.io/aquaveo/ngiab-to-cng@sha256:9c689f6e244384f538a21a42fff65946d05e8262cf9d9525ff5e1734a71ca93c   # 0.3.0
+  command: [python, /app/ngiab_to_cng.py]
+  args:
+    - "{ngen_run}"
+    - --output
+    - "{workdir}/ngen-run_cng"
+    - --run-id
+    - "{run}"
+    - --configuration-name
+    - "{configuration_name}"
+  inputs:
+    - {name: ngen_run, type: directory, data: ngen-run, path: ngen-run}
+    - {name: configuration_name, type: string, default: ngiab, pattern: '[A-Za-z0-9][A-Za-z0-9_-]*',
+       description: TEEHR configuration name}
+  outputs:
+    - {name: cng, type: directory, data: ngen-cng, path: ngen-run_cng}
+  cpu: 1
+  ram_mb: 2048
+
+# From hydrowf-tools nextgen/cng-to-ngen: copies run/ of an ngiab-to-cng 0.3.0+ output back into a run
+# folder, checking each file's SHA-256. `command` repeats its ENTRYPOINT, as for ngiab-to-cng.
+- kind: tool
+  id: cng-to-ngen
+  version: 0.1.0
+  title: Cloud-native files back to an NGIAB run folder
+  image: ghcr.io/aquaveo/cng-to-ngen@sha256:410f23c307dab44f735d839ed2d7005973c3aa92daa8ecf8630714f663c56b08   # 0.1.0
+  command: [python, /app/cng_to_ngen.py]
+  args: ["{cng}", --output, "{workdir}/ngen-run"]
+  inputs:
+    - {name: cng, type: directory, data: ngen-cng, path: ngen-run_cng,
+       description: "from ngiab-to-cng 0.3.0 or later (its manifest lists `rerun`)"}
+  outputs:
+    - {name: ngen_run, type: directory, data: ngen-run, path: ngen-run}
+  cpu: 1
+  ram_mb: 512
 
 # From hydrowf-tools nextgen/ngiab-calibrate (ngiab-cal + ngen-cal, built on the image ngiab-run
 # uses). `command` repeats its ENTRYPOINT, as for ngiab-to-cng. The script copies the run
@@ -331,6 +381,116 @@
         ngen_run: {step: calibrate, output: ngen_run}
     - name: to-cng
       tool: {id: ngiab-to-cng, version: 0.1.0}
+      inputs:
+        ngen_run: {step: run, output: ngen_run}
+        configuration_name: {input: configuration_name}
+  outputs:
+    run: {step: run, output: ngen_run}
+    cng: {step: to-cng, output: cng}
+
+# 0.2.0: the same steps; to-cng is ngiab-to-cng 0.3.0, so the cng output can be rerun (ngiab-rerun)
+- kind: pipeline
+  id: ngiab-simulation
+  version: 0.2.0
+  title: Preprocess, run NextGen, convert to cloud-native files
+  inputs:
+    - {name: feature, type: string}
+    - {name: start_date, type: string}
+    - {name: end_date, type: string}
+    - {name: hydrofabric, type: file, data: hydrofabric-gpkg}
+    - {name: hydrofabric_graph, type: file, data: hydrofabric-graph, optional: true,
+       description: "without it, the preprocessor builds the graph from the gpkg"}
+    - {name: configuration_name, type: string, default: ngiab_cfe_default}
+  steps:
+    - name: preprocess
+      tool: {id: ngiab-preprocess, version: 4.9.5}
+      inputs:
+        hydrofabric: {input: hydrofabric}
+        hydrofabric_graph: {input: hydrofabric_graph}
+        feature: {input: feature}
+        start_date: {input: start_date}
+        end_date: {input: end_date}
+    - name: run
+      tool: {id: ngiab-run, version: 2.1.0}
+      inputs:
+        ngen_run: {step: preprocess, output: ngen_run}
+    - name: to-cng
+      tool: {id: ngiab-to-cng, version: 0.3.0}
+      inputs:
+        ngen_run: {step: run, output: ngen_run}
+        configuration_name: {input: configuration_name}
+  outputs:
+    run: {step: run, output: ngen_run}
+    cng: {step: to-cng, output: cng}
+
+- kind: pipeline
+  id: ngiab-calibration
+  version: 0.2.0
+  title: Preprocess, calibrate, run NextGen with the calibrated parameters, convert to cloud-native files
+  inputs:
+    # the only pipeline-level pattern, from the wiring: gage is also the preprocessor's feature, which
+    # reads a bare 01031510 as cat-01031510, so the prefix calibrate itself doesn't need is required here
+    - {name: gage, type: string, pattern: 'gage-[0-9A-Za-z]+',
+       description: "gage-01031510: the subset outlet and the calibration gage"}
+    - {name: start_date, type: string, description: "at least 2 years: warm-up, calibration, validation"}
+    - {name: end_date, type: string}
+    - {name: hydrofabric, type: file, data: hydrofabric-gpkg}
+    - {name: hydrofabric_graph, type: file, data: hydrofabric-graph, optional: true}
+    - {name: iterations, type: int, default: 100}
+    - {name: warmup_days, type: int, default: 365}
+    - {name: calibration_ratio, type: float, default: 0.5}
+    - {name: configuration_name, type: string, default: ngiab_cfe_calibrated}
+  steps:
+    - name: preprocess
+      tool: {id: ngiab-preprocess, version: 4.9.5}
+      inputs:
+        hydrofabric: {input: hydrofabric}
+        hydrofabric_graph: {input: hydrofabric_graph}
+        feature: {input: gage}
+        start_date: {input: start_date}
+        end_date: {input: end_date}
+    - name: calibrate
+      tool: {id: ngiab-calibrate, version: 0.2.0}
+      inputs:
+        ngen_run: {step: preprocess, output: ngen_run}
+        gage: {input: gage}                             # the wrapper strips "gage-"
+        iterations: {input: iterations}
+        warmup_days: {input: warmup_days}
+        calibration_ratio: {input: calibration_ratio}
+    - name: run
+      tool: {id: ngiab-run, version: 2.1.0}
+      inputs:
+        ngen_run: {step: calibrate, output: ngen_run}
+    - name: to-cng
+      tool: {id: ngiab-to-cng, version: 0.3.0}
+      inputs:
+        ngen_run: {step: run, output: ngen_run}
+        configuration_name: {input: configuration_name}
+  outputs:
+    run: {step: run, output: ngen_run}
+    cng: {step: to-cng, output: cng}
+
+# Rerun a run from its cloud-native output: rebuild the run folder (cng-to-ngen), run NextGen again and
+# convert. The cng input must come from ngiab-to-cng 0.3.0 or later; an older one is refused by cng-to-ngen.
+- kind: pipeline
+  id: ngiab-rerun
+  version: 0.1.0
+  title: Rerun NextGen from a cloud-native output, convert to cloud-native files
+  inputs:
+    - {name: cng, type: directory, data: ngen-cng,
+       description: "the cng output of an earlier ngiab-simulation, ngiab-calibration or ngiab-rerun job (0.2.0+)"}
+    - {name: configuration_name, type: string, default: ngiab_rerun}
+  steps:
+    - name: rebuild
+      tool: {id: cng-to-ngen, version: 0.1.0}
+      inputs:
+        cng: {input: cng}
+    - name: run
+      tool: {id: ngiab-run, version: 2.1.0}
+      inputs:
+        ngen_run: {step: rebuild, output: ngen_run}
+    - name: to-cng
+      tool: {id: ngiab-to-cng, version: 0.3.0}
       inputs:
         ngen_run: {step: run, output: ngen_run}
         configuration_name: {input: configuration_name}

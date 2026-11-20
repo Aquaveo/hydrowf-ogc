@@ -30,6 +30,12 @@ CONFIG = REPO / "pygeoapi-config.yml"
 SHIPPED = [{**lego.model_dump(mode="json"), "visibility": "public"}
            for lego in LEGOS.validate_python(yaml.safe_load((REPO / "registry" / "legos.yaml").read_text()))]
 SIM = "ngiab-simulation"
+NEW = "9.0.0"                          # a version the shipped registry doesn't have: what a test publishes
+
+
+def latest(id):
+    """The newest version of `id` in the shipped registry."""
+    return max((b["version"] for b in SHIPPED if b["id"] == id), key=lambda v: tuple(map(int, v.split("."))))
 
 
 def body(id, version=None):
@@ -78,11 +84,11 @@ def test_a_snapshot_is_kept_for_ttl_seconds():
     fake, clock = FakeRegistry(), Clock()
     registry = remote(fake, ttl=60, clock=clock)
     registry.processes()
-    fake.bodies.append(body(SIM, "0.2.0"))
+    fake.bodies.append(body(SIM, NEW))
     clock.now = 59
-    assert f"{SIM}@0.2.0" not in registry.processes() and fake.calls == 1
+    assert f"{SIM}@{NEW}" not in registry.processes() and fake.calls == 1
     clock.now = 60
-    assert f"{SIM}@0.2.0" in registry.processes() and fake.calls == 2
+    assert f"{SIM}@{NEW}" in registry.processes() and fake.calls == 2
 
 
 def test_an_unreachable_registry_keeps_serving_the_last_snapshot():
@@ -104,16 +110,16 @@ def test_never_read_and_unreachable_is_an_error():
 
 
 def test_a_lego_that_does_not_validate_here_is_left_out_alone():
-    broken = {**body(SIM, "0.2.0"), "unknown_field": 1}       # e.g. written by a newer hydrowf-core
+    broken = {**body(SIM, NEW), "unknown_field": 1}           # e.g. written by a newer hydrowf-core
     processes = remote(FakeRegistry(SHIPPED + [broken])).processes()
-    assert f"{SIM}@0.2.0" not in processes and f"{SIM}@0.1.0" in processes
+    assert f"{SIM}@{NEW}" not in processes and f"{SIM}@{latest(SIM)}" in processes
 
 
 def test_a_pipeline_whose_tool_is_not_public_is_left_out():
-    orphan = body(SIM, "0.3.0")
+    orphan = body(SIM, NEW)
     orphan["steps"] = [{**step, "tool": {"id": "private-tool", "version": "1.0.0"}} for step in orphan["steps"]]
     processes = remote(FakeRegistry(SHIPPED + [orphan])).processes()
-    assert f"{SIM}@0.3.0" not in processes and processes[SIM].version == "0.1.0"
+    assert f"{SIM}@{NEW}" not in processes and processes[SIM].version == latest(SIM)
 
 
 @pytest.mark.parametrize("section, message", [
@@ -173,12 +179,12 @@ def test_a_versioned_process_describes_itself_by_its_own_id(client):
 
 
 def test_a_pipeline_published_to_the_registry_becomes_runnable(client, fake, runtime):
-    fake.bodies.append(body(SIM, "0.2.0"))
+    fake.bodies.append(body(SIM, NEW))
     response = client.post(f"/ogc/processes/{SIM}/execution", json={"inputs": INPUTS},
                            headers={"Authorization": f"Bearer {token()}", "Prefer": "respond-async"})
     assert response.status_code == 201, response.text
     [workflow] = runtime.submitted
-    assert workflow["metadata"]["labels"]["hydrowf/version"] == "0.2.0"    # the id ran its latest version
+    assert workflow["metadata"]["labels"]["hydrowf/version"] == NEW        # the id ran its latest version
     assert workflow["metadata"]["labels"]["hydrowf/owner"] == ME
 
 
@@ -310,7 +316,8 @@ def registry_manager(fake):
 def test_results_find_an_outputs_data_lego_in_the_registry():
     with caller.acting_as(ME):
         results = registry_manager(FakeRegistry()).get_job_result("job-done")[1]
-    assert results["cng"]["item"]["properties"]["hydrowf:data"] == "ngen-cng@1.0.0"
+    # a run from before formats: its output's data lego at the latest version
+    assert results["cng"]["item"]["properties"]["hydrowf:data"] == f"ngen-cng@{latest('ngen-cng')}"
 
 
 def test_results_answer_without_items_while_the_registry_was_never_read():
