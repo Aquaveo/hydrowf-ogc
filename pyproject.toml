@@ -21,7 +21,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-hydrowf-core = { git = "https://github.com/Aquaveo/hydrowf-core", rev = "e4c571a" }
+hydrowf-core = { git = "https://github.com/Aquaveo/hydrowf-core", rev = "e4facfc" }
 
 [build-system]
 requires = ["hatchling"]

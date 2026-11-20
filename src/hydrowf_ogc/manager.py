@@ -54,10 +54,11 @@ from pygeoapi.process.base import (BaseProcessor, JobNotFoundError, JobResultNot
 from pygeoapi.process.manager.base import BaseManager
 from pygeoapi.util import DATETIME_FORMAT, JobStatus
 
-from hydrowf_core.adapters.argo import FILE_TYPES, MAX_KEEP_DAYS, BadInputs, UnsupportedForArgo, render, semver
+from hydrowf_core.adapters.argo import (FILE_TYPES, MAX_KEEP_DAYS, BadInputs, UnsupportedForArgo, latest_data,
+                                        output_formats, render)
 from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
 from hydrowf_core.models import Pipeline
-from hydrowf_core.models.lego import DataLego, Lego, StacStorage, ToolLego
+from hydrowf_core.models.lego import DataLego, Lego, Port, StacStorage
 from hydrowf_ogc import caller, stac
 from hydrowf_ogc.downloads import Presigner, TooLarge, clean_key, presigner_from, split_s3_url
 from hydrowf_ogc.processor import PipelineProcessor
@@ -295,25 +296,44 @@ class ArgoManager(BaseManager):
             if not clean_key(key):
                 raise BadExecuteRequest(user_msg=f"input {port.name}: a key uses A-Z a-z 0-9 . _ / - only, "
                                                  "with no empty, . or .. part")
-            if not self._may_read(key, me):
+            may_read, run = self._may_read(key, me)
+            if not may_read:
                 raise ForbiddenInput(user_msg=f"input {port.name}: {url} is neither an output of one of "
                                               "your jobs nor a shared input")
+            if run is not None and (problem := self._type_problem(port, key, run)):
+                raise BadExecuteRequest(user_msg=f"input {port.name}: {problem}")
 
-    def _may_read(self, key: str, me: str) -> bool:
-        """Something below a shared prefix (never the whole prefix), or one output of one of `me`'s jobs:
+    def _type_problem(self, port: Port, key: str, run: RunStatus) -> str | None:
+        """Why the output at `key` of the caller's job `run` (_may_read's answer) can't feed `port`: its run
+        recorded it as another data lego (hydrowf/formats). None when it fits, and when nothing is recorded
+        for exactly that key: a run from before formats, or a file inside an output (no recorded type)."""
+        try:
+            outputs = self.runtime.outputs(run.name)
+        except NotFound:                           # gone since _may_read: Argo will say so when it stages
+            return None
+        for name, url in outputs.items():
+            if split_s3_url(url)[1].rstrip("/") != key.rstrip("/"):
+                continue
+            written = run.formats.get(name, "").partition("@")[0]
+            if written and written != port.data:
+                return f"{url} is {written} data; this input takes {port.data}"
+        return None
+
+    def _may_read(self, key: str, me: str) -> tuple[bool, RunStatus | None]:
+        """Whether `me` may pass `key`, and the job run it belongs to (None for a shared key): something
+        below a shared prefix (never the whole prefix), or one output of one of `me`'s jobs:
         <job>/<pod>/<output>[/...], never a whole job or a whole step, which would stage every output
         (and the logs) into one pod."""
         if any(key.startswith(prefix) and len(key.rstrip("/")) >= len(prefix) for prefix in self.shared_inputs):
-            return True
+            return True, None
         parts = key.rstrip("/").split("/")
         if len(parts) < 3 or not JOB_NAME.fullmatch(parts[0]):  # never ask Argo about a name it can't have
-            return False
-        job = parts[0]
+            return False, None
         try:
-            run = self.runtime.status(job)
+            run = self.runtime.status(parts[0])
         except NotFound:                           # a deleted job's outputs are nobody's
-            return False
-        return run.labels.get(caller.OWNER_LABEL) == me
+            return False, None
+        return run.labels.get(caller.OWNER_LABEL) == me, run
 
     def add_job(self, job_metadata: dict) -> str:
         return job_metadata["identifier"]          # Argo holds the job: nothing to store
@@ -384,27 +404,21 @@ class ArgoManager(BaseManager):
 
     def output_data(self, run: RunStatus) -> dict[str, DataLego]:
         """Pipeline output name -> its data lego, for the outputs whose data has STAC storage with
-        `item_from`: output -> step -> the tool's output port -> its `data`, at the latest version of it with
-        STAC storage (as render() picks `archive`), read now: a newer version than the job ran with
-        decides its Item."""
+        `item_from`. The data lego is the one the run recorded (hydrowf/formats: id@version), so a newer
+        version published since doesn't change an old job's Item. Runs from before formats, and recorded
+        versions no longer offered, fall back to the pipeline's format at the data lego's latest version."""
         found = self.pipeline_legos(run.pipeline, run.labels.get("hydrowf/version", ""))
         if found is None:
             return {}
         pipeline, legos = found
-        tools = {(x.id, x.version): x for x in legos if isinstance(x, ToolLego)}
-        latest: dict[str, DataLego] = {}
-        for lego in legos:
-            if not (isinstance(lego, DataLego) and isinstance(lego.storage, StacStorage)):
-                continue
-            if lego.id not in latest or semver(lego.version) > semver(latest[lego.id].version):
-                latest[lego.id] = lego
-        steps = {s.name: s for s in pipeline.steps}
+        by_key = {(x.id, x.version): x for x in legos if isinstance(x, DataLego)}
+        latest = latest_data(legos)
+        written = {**output_formats(pipeline, legos), **run.formats}   # what the run recorded wins
         data = {}
-        for name, link in pipeline.outputs.items():
-            tool = tools.get(steps[link.step].tool.key())
-            port = next((p for p in tool.outputs if p.name == link.output), None) if tool else None
-            lego = latest.get(port.data) if port and port.data else None
-            if lego and lego.storage.item_from:
+        for name, ref in written.items():
+            data_id, _, version = ref.partition("@")
+            lego = by_key.get((data_id, version)) or latest.get(data_id)
+            if lego and isinstance(lego.storage, StacStorage) and lego.storage.item_from:
                 data[name] = lego
         return data
 

@@ -3,6 +3,7 @@
 import contextvars
 import io
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -679,3 +680,65 @@ def test_a_broken_registry_file_gives_links_without_items(tmp_path, content):
         broken.write_text(content)
     results, s3 = results_with({MANIFEST_KEY: MANIFEST}, registry=broken)
     assert "item" not in results["cng"] and len(results["cng"]["files"]) == 2 and s3.reads == []
+
+
+# ---- what a run recorded (hydrowf/formats) decides an old job's Item and what its outputs may feed
+
+
+def recorded(run, **formats):
+    return RunStatus(run.name, run.phase, pipeline=run.pipeline, finished_at=run.finished_at,
+                     labels=run.labels, formats=formats)
+
+
+def test_an_item_follows_the_data_lego_version_the_run_recorded(tmp_path):
+    registry = registry_where_cng(tmp_path, STAC, {**STAC, "item_from": "meta/stac.json"})   # 1.0.0, 2.0.0
+    results, s3 = results_with({MANIFEST_KEY: MANIFEST}, run=recorded(SIMULATED, cng="ngen-cng@1.0.0"),
+                               registry=registry)
+    assert results["cng"]["item"]["properties"]["hydrowf:data"] == "ngen-cng@1.0.0"
+    assert [key for _, key, _ in s3.reads] == [MANIFEST_KEY]                  # 1.0.0's item_from, not 2.0.0's
+
+
+def test_a_recorded_version_no_longer_offered_falls_back_to_the_latest(tmp_path):
+    other = "job-done/job-done-step-to-cng-1/cng/meta/stac.json"
+    registry = registry_where_cng(tmp_path, STAC, {**STAC, "item_from": "meta/stac.json"})
+    results, _ = results_with({other: MANIFEST}, run=recorded(SIMULATED, cng="ngen-cng@9.9.9"), registry=registry)
+    assert results["cng"]["item"]["properties"]["hydrowf:data"] == "ngen-cng@2.0.0"
+
+
+CNG_OUT = "s3://my-bucket/job-done/job-done-step-to-cng-1/cng/"
+
+
+def runtime_where_job_done_wrote(**formats):
+    return FakeRuntime([recorded(DONE, **formats)], outputs={"job-done": {"cng": CNG_OUT}})
+
+
+@pytest.mark.parametrize("output, given", [
+    (CNG_OUT, CNG_OUT),                                                          # a directory, as listed
+    (CNG_OUT, CNG_OUT.rstrip("/")),                                              # ... without its slash
+    (OUTPUT_OF("job-done", "job-done"), OUTPUT_OF("job-done", "job-done")),      # a .tgz
+    ("s3://my-bucket/job-done/job-done-step-x-1/region/region.gpkg",) * 2,       # a file
+], ids=["directory", "directory-without-slash", "tgz", "file"])
+def test_a_job_output_of_another_data_type_is_a_400_and_nothing_runs(output, given):
+    m = manager(FakeRuntime([recorded(DONE, cng="ngen-cng@1.0.0")], outputs={"job-done": {"cng": output}}))
+    with pytest.raises(BadExecuteRequest, match=re.escape(f"input hydrofabric: {output} is ngen-cng data; "
+                                                          "this input takes hydrofabric-gpkg")) as err:
+        m.execute_process("ngiab-simulation", run_with(given))
+    assert err.value.http_status_code == 400 and m.runtime.submitted == []
+
+
+def test_a_job_with_an_unreadable_outputs_record_is_not_type_checked():
+    m = manager(FakeRuntime([recorded(DONE, cng="ngen-cng@1.0.0")], outputs={}))   # outputs_of gave {}
+    m.execute_process("ngiab-simulation", run_with(CNG_OUT))
+    assert len(m.runtime.submitted) == 1
+
+
+@pytest.mark.parametrize("formats, url", [
+    ({"cng": "hydrofabric-gpkg@1.0.0"}, CNG_OUT),                         # recorded as what the input takes
+    ({}, CNG_OUT),                                                       # a run from before formats
+    ({"cng": "ngen-cng@1.0.0"}, CNG_OUT + "hydrofabric/divides.parquet"),   # a file inside an output: untyped
+    ({"cng": "ngen-cng@1.0.0"}, "s3://my-bucket/hydrofabric/v2.2/conus_nextgen.gpkg"),   # a shared key
+], ids=["same-type", "no-record", "file-inside", "shared"])
+def test_an_input_runs_unless_its_run_recorded_another_type(formats, url):
+    m = manager(runtime_where_job_done_wrote(**formats))
+    m.execute_process("ngiab-simulation", run_with(url))
+    assert len(m.runtime.submitted) == 1
