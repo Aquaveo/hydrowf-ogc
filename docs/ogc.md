@@ -136,7 +136,10 @@ manager config (`[hydrofabric/]` here). A key in another bucket, or with charact
 `A-Z a-z 0-9 . _ / -`, is `400`; any other key is `403`, and nothing is submitted. An input is one
 output (`<job>/<pod>/<output>`, a `.tgz`, a file or a directory ending in `/`) or something below a
 shared prefix: never a whole job, a whole step or a whole shared prefix, which would stage all of it
-into one pod.
+into one pod. An output also has a type: its run records the data lego each pipeline output was written
+as (the `hydrowf/formats` annotation, hydrowf-core), and an output recorded as another data lego than the
+input takes is `400` (e.g. an `ngen-cng` folder where an `ngen-run` is wanted). A file inside an output,
+a shared key and an output of a run from before formats have no recorded type and are not checked.
 
 ## Dismissing a job
 
@@ -259,10 +262,9 @@ Verified earlier through the Tethys portal, with the same manager code:
 - **Items live in job results only.** There is no STAC catalog or search yet: an Item is reached through
   its job, and only by the job's owner. Its download links expire like the others; its `s3`
   alternates last until the job is deleted. A bbox that crosses the antimeridian is refused.
-- **An Item follows the data lego's latest version.** Which manifest an output has (`item_from`) is
-  read from the latest STAC version of its data lego when the results are asked for, not recorded when
-  the job ran; a newer version that changes `item_from` changes old jobs' Items. Recording it in the
-  workflow at render time (hydrowf-core) would fix that.
+- **Runs from before formats follow the data lego's latest version.** A run records the data lego
+  version of each output (`hydrowf/formats`), and its Item follows that version. Older runs, and runs
+  whose recorded version is no longer offered, use the latest STAC version of the data lego instead.
 - **Inputs are job outputs or shared data.** There are no per-user uploads yet, and a deleted or
   expired job's outputs can no longer be passed as inputs.
 - **An input can expire before it is read.** Argo fetches a step's inputs when its pod starts, which
