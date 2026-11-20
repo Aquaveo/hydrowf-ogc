@@ -88,7 +88,7 @@
   version: 1.0.0
   title: NGIAB run folder
   data_kind: output
-  storage: {driver: stac, format: other}
+  storage: {driver: stac, format: other, archive: tgz}    # a working folder: one .tgz, its s3 URL in results
 
 # Images built in hydrowf-tools (nextgen/<tool>/Dockerfile) are released by a tag <tool>/v<version>,
 # which publishes ghcr.io/aquaveo/<tool>:<version>. Each is pinned here by digest (the lego model takes
