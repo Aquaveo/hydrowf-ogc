@@ -15,13 +15,13 @@ import yaml
 from pygeoapi.config import get_config
 from pygeoapi.openapi import get_oas
 from starlette.testclient import TestClient
-from test_manager import INPUTS, ME, FakeRuntime
+from test_manager import CNG, INPUTS, MANIFEST, MANIFEST_KEY, ME, SIMULATED, FakeRuntime, presigner_reading
 from test_app import AUDIENCE, ISSUER, URL, StubKeys, token
 
 from hydrowf_core.auth import BearerAuth
 from hydrowf_core.models import LEGOS
-from hydrowf_ogc import app as service
-from hydrowf_ogc.manager import registry_from
+from hydrowf_ogc import app as service, caller
+from hydrowf_ogc.manager import ArgoManager, registry_from
 from hydrowf_ogc import registry as registry_module
 from hydrowf_ogc.registry import RegistryError, RemoteRegistry, fetch_public_legos
 
@@ -294,6 +294,31 @@ def test_a_versioned_process_runs_that_version(client, fake, runtime):
                            headers={"Authorization": f"Bearer {token()}", "Prefer": "respond-async"})
     assert response.status_code == 201, response.text
     assert runtime.submitted[0]["metadata"]["labels"]["hydrowf/version"] == "0.1.0"
+
+
+def registry_manager(fake):
+    presigner = presigner_reading({MANIFEST_KEY: json.dumps(MANIFEST).encode()})
+    return ArgoManager({
+        "name": "hydrowf_ogc.manager.ArgoManager",
+        "runtime": FakeRuntime([SIMULATED], outputs={"job-done": {"cng": CNG}}),
+        "presigner": presigner,
+        "registry_fetch": fake,
+        "connection": {"bucket": "my-bucket", "registry": {"url": "http://registry.test"}},
+    })
+
+
+def test_results_find_an_outputs_data_lego_in_the_registry():
+    with caller.acting_as(ME):
+        results = registry_manager(FakeRegistry()).get_job_result("job-done")[1]
+    assert results["cng"]["item"]["properties"]["hydrowf:data"] == "ngen-cng@1.0.0"
+
+
+def test_results_answer_without_items_while_the_registry_was_never_read():
+    fake = FakeRegistry()
+    fake.down = True
+    with caller.acting_as(ME):
+        results = registry_manager(fake).get_job_result("job-done")[1]
+    assert "item" not in results["cng"] and len(results["cng"]["files"]) == 2
 
 
 def test_each_thread_has_its_own_processor(client):

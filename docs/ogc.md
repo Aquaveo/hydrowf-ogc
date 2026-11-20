@@ -52,6 +52,19 @@ how its data lego stores it (`archive`, hydrowf-core):
 | a file (the default, `archive: none`) | `…/<output>/<file name>` | one `href`, typed by the file name |
 | a directory of files (the default) | `…/<output>/` | `files`: each file's `path`, `size` and `href`, at most 1000 (`truncated` says if there were more); `error` if they can't be listed |
 
+A directory output whose data lego is `driver: stac` (with `item_from`, by default `manifest.json`)
+also gets an `item`: a STAC 1.1 Item built from the manifest the tool wrote at the top of the directory
+([stac.py](../src/hydrowf_ogc/stac.py) has the manifest's contract). Each output the manifest lists is
+an asset keyed by its path: `href` downloads a single file (presigned), a Zarr store is its `s3://`
+address, and every asset keeps its `s3` address as the `alternate`. The asset's `type` comes from the
+manifest's `format`, and its `hydrowf:schema` from `schema` (e.g. `teehr.secondary_timeseries@0.8.0`).
+The manifest's `bbox` (WGS84) is the Item's geometry and its `start_datetime`/`end_datetime` its
+period; without them the geometry is null and `datetime` is the job's finish time. A manifest that is
+missing, over 1 MiB or breaks the contract (a path outside the directory, a bad bbox) gives an
+`item_error` instead; the links answer either way. A data lego whose tool writes no manifest sets
+`item_from: null`. The Item is built on every request from the manifest (outputs don't change once
+written); /ogc writes nothing to S3.
+
 The key needs GetObject, and ListBucket for directories. On kind, mount a copy of the config with
 `downloads: {endpoint: http://localhost:9000}` and port-forward `svc/minio` to 9000. Only the service
 keeps those links from anonymous callers, so never turn `downloads` on under plain `pygeoapi serve`.
@@ -243,6 +256,13 @@ Verified earlier through the Tethys portal, with the same manager code:
 - **The baked-in config is kind's.** A cluster that forgets to mount its own runs against
   `localhost` with TLS checks off; the new cluster's config and manifests (hydrowf-deploy) mount theirs.
 - **Base images are pinned by tag**, not digest; pin them when CI builds this image.
+- **Items live in job results only.** There is no STAC catalog or search yet: an Item is reached through
+  its job, and only by the job's owner. Its download links expire like the others; its `s3`
+  alternates last until the job is deleted. A bbox that crosses the antimeridian is refused.
+- **An Item follows the data lego's latest version.** Which manifest an output has (`item_from`) is
+  read from the latest STAC version of its data lego when the results are asked for, not recorded when
+  the job ran; a newer version that changes `item_from` changes old jobs' Items. Recording it in the
+  workflow at render time (hydrowf-core) would fix that.
 - **Inputs are job outputs or shared data.** There are no per-user uploads yet, and a deleted or
   expired job's outputs can no longer be passed as inputs.
 - **An input can expire before it is read.** Argo fetches a step's inputs when its pod starts, which

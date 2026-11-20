@@ -1,10 +1,14 @@
 """ArgoManager with a fake ArgoRuntime (no cluster), driven through pygeoapi's own execute_process."""
 
 import contextvars
+import io
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import yaml
+from botocore.exceptions import ClientError, EndpointConnectionError
 from hera.exceptions import NotFound
 from pygeoapi.process.base import JobNotFoundError, JobResultNotFoundError
 from pygeoapi.util import JobStatus
@@ -470,7 +474,6 @@ def test_a_long_directory_listing_is_truncated():
 
 
 def test_a_directory_that_cannot_be_listed_still_answers():
-    from botocore.exceptions import EndpointConnectionError
     link = result_link(DIR, presigner_listing(error=EndpointConnectionError(endpoint_url="http://minio:9000")))
     assert link["s3"] == DIR and link["files"] == [] and "can't be listed" in link["error"]
 
@@ -510,3 +513,169 @@ def test_every_page_of_a_listing_is_read():
 def test_a_compressed_file_is_typed_by_its_compression():
     link = result_link("s3://my-bucket/job-done/job-done-step-x-1/out/data.tar.gz", presigner_listing())
     assert link["type"] == "application/gzip"
+
+
+# ---- STAC Items: a directory output whose data lego is driver: stac carries the Item of its manifest.json
+
+
+class StubS3(StubLister):
+    """A lister that also answers get_object: `objects` maps key -> bytes, or -> an exception to raise."""
+
+    def __init__(self, objects=None, keys=()):
+        super().__init__(keys)
+        self.objects, self.reads = objects or {}, []
+
+    def get_object(self, Bucket, Key, Range):
+        self.reads.append((Bucket, Key, Range))
+        found = self.objects.get(Key)
+        if isinstance(found, Exception):
+            raise found
+        if found is None:
+            raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "missing"}}, "GetObject")
+        if found == b"":                                  # S3 refuses any range of an empty object
+            raise ClientError({"Error": {"Code": "InvalidRange", "Message": "empty"}}, "GetObject")
+        start, end = (int(n) for n in Range.removeprefix("bytes=").split("-"))
+        return {"Body": io.BytesIO(found[start:end + 1])}
+
+
+def presigner_reading(objects=None):
+    presigner = Presigner("https://s3.example.org", "reader", "secret", expires=600)
+    presigner.lister = StubS3(objects, keys=["manifest.json", "timeseries/catchment.parquet"])
+    return presigner
+
+
+CNG = "s3://my-bucket/job-done/job-done-step-to-cng-1/cng/"
+MANIFEST_KEY = "job-done/job-done-step-to-cng-1/cng/manifest.json"
+MANIFEST = {"manifest_version": "0.1", "tool": {"name": "ngiab-to-cng", "version": "0.1.0"},
+            "outputs": [{"path": "timeseries/catchment.parquet", "format": "parquet"}]}
+SIMULATED = RunStatus("job-done", "Succeeded", pipeline="ngiab-simulation", finished_at=utc(2026, 11, 15, 0, 40, 15),
+                      labels={**MINE, "hydrowf/pipeline": "ngiab-simulation", "hydrowf/version": "0.1.0"})
+RUN_TGZ = "s3://my-bucket/job-done/job-done-step-run-1/ngen-run.tgz"
+
+
+def results_with(objects, run=SIMULATED, outputs=None, registry=None):
+    raw = {k: json.dumps(v).encode() if isinstance(v, dict) else v for k, v in objects.items()}
+    presigner = presigner_reading(raw)
+    m = manager(FakeRuntime([run], outputs={"job-done": outputs or {"run": RUN_TGZ, "cng": CNG}}), presigner=presigner)
+    if registry:
+        m.processes["ngiab-simulation"]["processor"] = {**PROCESSOR, "registry": str(registry)}
+    return m.get_job_result("job-done")[1], presigner.lister
+
+
+def test_a_stac_directory_output_carries_the_item_of_its_manifest():
+    results, s3 = results_with({MANIFEST_KEY: MANIFEST})
+    item = results["cng"]["item"]
+    assert item["id"] == "job-done-cng" and item["properties"]["hydrowf:data"] == "ngen-cng@1.0.0"
+    assert set(item["assets"]) == {"timeseries/catchment.parquet", "manifest.json"}
+    assert [f["path"] for f in results["cng"]["files"]] == ["manifest.json", "timeseries/catchment.parquet"]
+    assert "item" not in results["run"] and "item_error" not in results["run"]      # a .tgz has no Item
+    assert s3.reads == [("my-bucket", MANIFEST_KEY, "bytes=0-1048576")]             # one bounded read
+
+
+def test_an_output_without_its_manifest_says_so_and_keeps_its_links():
+    results, _ = results_with({})
+    assert results["cng"]["item_error"] == "the output has no manifest.json"
+    assert "item" not in results["cng"] and len(results["cng"]["files"]) == 2
+
+
+def test_a_manifest_that_breaks_the_contract_says_where():
+    bad = {**MANIFEST, "outputs": [{"path": "../../job-theirs/x.parquet", "format": "parquet"}]}
+    results, _ = results_with({MANIFEST_KEY: bad})
+    assert results["cng"]["item_error"].startswith("manifest.json is not a manifest: outputs.0.path:")
+
+
+@pytest.mark.parametrize("content, error", [
+    (b"{not json", "manifest.json is not a manifest"),
+    (b"[]", "manifest.json is not a manifest"),
+    (b" " * (1024 * 1024 + 1), "manifest.json is over 1048576 bytes"),
+], ids=["not-json", "not-an-object", "too-big"])
+def test_a_manifest_that_is_not_one_is_an_item_error(content, error):
+    results, _ = results_with({MANIFEST_KEY: content})
+    assert results["cng"]["item_error"].startswith(error)
+
+
+def test_a_manifest_that_cannot_be_read_right_now_is_an_item_error():
+    results, _ = results_with({MANIFEST_KEY: EndpointConnectionError(endpoint_url="http://minio:9000")})
+    assert results["cng"]["item_error"] == "manifest.json can't be read right now"
+
+
+def test_a_run_of_a_pipeline_no_longer_offered_has_links_and_no_item():
+    gone = RunStatus("job-done", "Succeeded", pipeline="ngiab-simulation",
+                     labels={**MINE, "hydrowf/pipeline": "ngiab-simulation", "hydrowf/version": "9.9.9"})
+    results, s3 = results_with({MANIFEST_KEY: MANIFEST}, run=gone)
+    assert "item" not in results["cng"] and "item_error" not in results["cng"] and s3.reads == []
+
+
+def test_without_downloads_no_manifest_is_read():
+    m = manager(FakeRuntime([SIMULATED], outputs={"job-done": {"cng": CNG}}))
+    assert m.get_job_result("job-done")[1] == {"cng": {"href": CNG}}
+
+
+def registry_where_cng(tmp_path, *storages):
+    """The fixture registry with ngen-cng's storage replaced: one version per storage, 1.0.0, 2.0.0, ..."""
+    legos = yaml.safe_load(REGISTRY.read_text())
+    cng = next(lego for lego in legos if lego["id"] == "ngen-cng")
+    legos.remove(cng)
+    legos += [{**cng, "version": f"{n + 1}.0.0", "storage": storage} for n, storage in enumerate(storages)]
+    path = tmp_path / "legos.yaml"
+    path.write_text(yaml.safe_dump(legos))
+    return path
+
+
+STAC = {"driver": "stac", "format": "other"}
+
+
+@pytest.mark.parametrize("item_from", ["../../job-theirs/x/manifest.json", "/etc/manifest.json", "a//manifest.json",
+                                       "meta/", "%2e%2e/manifest.json"])
+def test_an_item_from_outside_the_output_is_never_read(tmp_path, item_from):
+    registry = registry_where_cng(tmp_path, {**STAC, "item_from": item_from})
+    results, s3 = results_with({MANIFEST_KEY: MANIFEST}, registry=registry)
+    assert results["cng"]["item_error"] == f"ngen-cng@1.0.0: item_from {item_from!r} is not a path"
+    assert s3.reads == []
+
+
+@pytest.mark.parametrize("storage", [
+    {**STAC, "item_from": None},
+    {"driver": "stac", "format": "other", "archive": "tgz"},     # not a directory: no lookup at all
+    {"driver": "iceberg", "tables": {}},
+], ids=["item-from-null", "tgz", "not-stac"])
+def test_an_output_whose_data_has_no_manifest_gets_neither_item_nor_error(tmp_path, storage):
+    outputs = {"cng": CNG.rstrip("/") + ".tgz" if storage.get("archive") == "tgz" else CNG}
+    registry = registry_where_cng(tmp_path, storage)
+    results, s3 = results_with({MANIFEST_KEY: MANIFEST}, outputs=outputs, registry=registry)
+    assert "item" not in results["cng"] and "item_error" not in results["cng"] and s3.reads == []
+
+
+def test_the_latest_version_of_the_data_lego_decides(tmp_path):
+    other = "job-done/job-done-step-to-cng-1/cng/meta/stac.json"
+    registry = registry_where_cng(tmp_path, STAC, {**STAC, "item_from": "meta/stac.json"})
+    results, s3 = results_with({other: MANIFEST}, registry=registry)
+    assert results["cng"]["item"]["properties"]["hydrowf:data"] == "ngen-cng@2.0.0"
+    assert [key for _, key, _ in s3.reads] == [other]
+
+
+def test_a_manifest_s3_refuses_to_give_is_an_item_error():
+    denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetObject")
+    results, _ = results_with({MANIFEST_KEY: denied})
+    assert results["cng"]["item_error"] == "manifest.json can't be read right now"
+
+
+def test_an_empty_manifest_is_not_a_manifest():
+    results, _ = results_with({MANIFEST_KEY: b""})
+    assert results["cng"]["item_error"] == "manifest.json is not a manifest: it is empty"
+
+
+def test_a_manifest_with_no_time_at_all_is_an_item_error():
+    unfinished = RunStatus("job-done", "Succeeded", pipeline="ngiab-simulation", labels=SIMULATED.labels)
+    results, _ = results_with({MANIFEST_KEY: MANIFEST}, run=unfinished)
+    assert results["cng"]["item_error"].startswith("no datetime")
+
+
+@pytest.mark.parametrize("content", ["- kind: data\n  id: nope\n", "a: [unclosed\n", None],
+                         ids=["not-legos", "not-yaml", "missing"])
+def test_a_broken_registry_file_gives_links_without_items(tmp_path, content):
+    broken = tmp_path / "legos.yaml"
+    if content is not None:
+        broken.write_text(content)
+    results, s3 = results_with({MANIFEST_KEY: MANIFEST}, registry=broken)
+    assert "item" not in results["cng"] and len(results["cng"]["files"]) == 2 and s3.reads == []
