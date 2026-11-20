@@ -37,6 +37,7 @@ The image bakes in [pygeoapi-config.yml](../pygeoapi-config.yml), which is the *
 | `HYDROWF_OIDC_ISSUER`, `HYDROWF_OIDC_AUDIENCE` | Bearer tokens (see below). Without the issuer, only the catalogue is open and every job route is 401 |
 | `HYDROWF_ARGO_HOST`, `HYDROWF_ARGO_TOKEN` | Another Argo server than the config's |
 | `HYDROWF_S3_ACCESS_KEY`, `HYDROWF_S3_SECRET_KEY`, `HYDROWF_S3_PUBLIC_ENDPOINT` | Presigned result links, when the config has `downloads` |
+| `HYDROWF_REGISTRY_URL` | hydrowf-registry's URL: the processes are then its public pipelines (see below), not the config's |
 | `FORWARDED_ALLOW_IPS` | The ingress addresses whose `X-Forwarded-*` headers uvicorn trusts (`--proxy-headers`) |
 
 Job results are `s3://` links unless the manager config has a `downloads` section
@@ -50,6 +51,24 @@ pygeoapi's API and the manager are built once, at startup: a manager config that
 (`downloads`, `shared_inputs`, `retention`) stops the service there, before any request. The OpenAPI
 document (`/ogc/openapi`) is generated then too, from the config and `PYGEOAPI_SERVER_URL` the service
 runs with.
+
+## Processes from the registry
+
+With `connection.registry: {url, ttl}` in the manager config (or `HYDROWF_REGISTRY_URL`), the processes
+are hydrowf-registry's public pipelines ([registry.py](../src/hydrowf_platform/registry.py)): each
+version as `<id>@<version>` (e.g. `ngiab-simulation@0.1.0`) and `<id>` as its latest version. The service
+reads `GET /legos` once per `ttl` seconds (default 60). A lego that doesn't validate with this
+hydrowf-core, or a pipeline whose tools aren't public, is left out and logged. If the registry can't be
+reached, the last list is served; before any, the list is empty, and the registry is tried again at
+most every 5 seconds. Once there is a list, a refresh never holds requests up: one request reads the
+registry while the others keep the current list. Before the first list, requests wait for the first read.
+Every read is bounded: connecting takes at most the resolver's time plus 5 s per address and 5 s for TLS,
+and from then on a watchdog cuts the read at 15 s (request, headers and body alike). An answer is at most
+32 MB, http(s) only, with no redirects; one cut short is refused. The registry is reached directly: proxy
+variables (`HTTP(S)_PROXY`) aren't used, and a query string in its URL is dropped. Only public legos are
+used, whatever the registry answers. A pipeline published to the registry
+becomes runnable here within `ttl`, with no rebuild or restart. Without `registry`, the processes are the
+config's resources, as before.
 
 ## Routes and who may call them
 
@@ -200,8 +219,15 @@ Verified earlier through the Tethys portal, with the same manager code:
   then refuse) is planned.
 - **Groups and admins.** A caller sees only their own jobs; sharing with a Keycloak group, or an
   admin who sees everyone's, comes with the authorization work.
-- **Processes come from the config.** The process list is the config's `resources`; reading them
-  from the lego registry service comes next.
+- **Only public pipelines.** With `registry` set, `/ogc` offers the registry's public pipelines only
+  (read anonymously); a caller's private pipelines would need the registry asked with their token.
+- **New pipelines wait up to `ttl`** (60 s by default) to appear, and the OpenAPI document lists the
+  processes of the moment the service started.
+- **`<id>` follows the latest version.** A caller who read `ngiab-simulation`'s description and then
+  executes it may run a newer version published in between; each run records the version it ran (the
+  workflow's `hydrowf/version` label). Pin `<id>@<version>` to be exact.
+- **A job's `processID` is the pipeline id**, not the `<id>@<version>` it was started with; the version
+  is in the workflow's `hydrowf/version` label.
 - **The baked-in config is kind's.** A cluster that forgets to mount its own runs against
   `localhost` with TLS checks off; the new cluster's config and manifests (hydrowf-deploy) mount theirs.
 - **Base images are pinned by tag**, not digest; pin them when CI builds this image.
