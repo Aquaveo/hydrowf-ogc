@@ -13,7 +13,7 @@ from hydrowf_core.adapters.argo_runtime import RunStatus
 from hydrowf_ogc import caller
 from hydrowf_ogc.downloads import Presigner
 from hydrowf_ogc.manager import (ArgoManager, BadExecuteRequest, ForbiddenInput, job_dict, keep_days,
-                                 shared_prefixes)
+                                 result_link, shared_prefixes)
 
 REGISTRY = Path(__file__).parent / "fixtures" / "legos.yaml"
 PROCESSOR = {
@@ -244,9 +244,15 @@ def run_with(hydrofabric):
     return {**INPUTS, "hydrofabric": hydrofabric}
 
 
-def test_an_output_of_the_callers_own_job_is_an_input():
+@pytest.mark.parametrize("url", [
+    OUTPUT_OF("job-done", "job-done"),                                   # a .tgz output
+    "s3://my-bucket/job-done/job-done-step-to-cng-1/cng/",               # a directory output (files)
+    "s3://my-bucket/job-done/job-done-step-x-1/region/region.gpkg",      # a file output
+    "s3://my-bucket/hydrofabric/v2.2/",                                  # a folder below a shared prefix
+], ids=["tgz", "directory", "file", "shared-subfolder"])
+def test_an_output_of_the_callers_own_job_is_an_input(url):
     m = manager(FakeRuntime([DONE]))
-    m.execute_process("ngiab-simulation", run_with(OUTPUT_OF("job-done", "job-done")))
+    m.execute_process("ngiab-simulation", run_with(url))
     assert len(m.runtime.submitted) == 1
 
 
@@ -257,6 +263,10 @@ def test_an_output_of_the_callers_own_job_is_an_input():
     "s3://my-bucket/hydrofabric-v3/conus.gpkg",          # a name that only starts like the prefix
     "s3://my-bucket/Not_A_Job/x.tgz",                    # can't be a workflow name: Argo isn't asked
     "s3://my-bucket/job-done",                           # a bare job id is not one of its outputs
+    "s3://my-bucket/job-done/",                          # nor is the job as a directory: every output, logs too
+    "s3://my-bucket/job-done/job-done-step-run-1/",      # nor a whole step
+    "s3://my-bucket/hydrofabric/",                       # the whole shared tree, not something in it
+    "s3://my-bucket/job-theirs/job-theirs-step-to-cng-1/cng/",   # another caller's directory output
 ])
 def test_any_other_key_is_forbidden_and_nothing_runs(url):
     m = manager(FakeRuntime([DONE, THEIRS, NOBODYS]))
@@ -397,3 +407,106 @@ def test_delete_removes_the_run():
     m = manager(FakeRuntime([DONE]))
     assert m.delete_job("job-done") is True
     assert m.runtime.runs == {}
+
+
+# ---- results for outputs stored as files: a .tgz, a file, or a directory (a key ending in "/")
+
+
+class StubLister:
+    """An S3 client's list_objects_v2 paginator: `keys` under the prefix, or `error` when listing."""
+
+    def __init__(self, keys=(), error=None):
+        self.keys, self.error = list(keys), error
+
+    def get_paginator(self, operation):
+        stub = self
+
+        class Paginator:
+            def paginate(self, Bucket, Prefix, PaginationConfig):
+                if stub.error:
+                    raise stub.error
+                matching = [{"Key": Prefix + key, "Size": 10} for key in stub.keys][:PaginationConfig["MaxItems"]]
+                size = 3                                  # small pages: the listing must read every one
+                for start in range(0, len(matching), size):
+                    yield {"Contents": matching[start:start + size]}
+        return Paginator()
+
+
+def presigner_listing(keys=(), error=None):
+    presigner = Presigner("https://s3.example.org", "reader", "secret", expires=600)
+    presigner.lister = StubLister(keys, error)
+    return presigner
+
+
+DIR = "s3://my-bucket/job-done/job-done-step-to-cng-1/cng/"
+
+
+@pytest.mark.parametrize("url, kind", [
+    ("s3://my-bucket/job-done/job-done-step-run-1/ngen-run.tgz", "application/gzip"),
+    ("s3://my-bucket/job-done/job-done-step-x-1/region/region.gpkg", "application/geopackage+sqlite3"),
+    ("s3://my-bucket/job-done/job-done-step-x-1/out/data.unknownext", "application/octet-stream"),
+], ids=["tgz", "file", "file-of-unknown-type"])
+def test_a_tgz_or_a_file_is_one_link(url, kind):
+    link = result_link(url, presigner_listing())
+    assert link["s3"] == url and link["href"].startswith("https://s3.example.org/my-bucket/job-done/")
+    if kind != "application/geopackage+sqlite3":       # mimetypes' answer for .gpkg depends on the system
+        assert link["type"] == kind
+
+
+def test_a_directory_lists_its_files_each_with_a_link():
+    link = result_link(DIR, presigner_listing(["manifest.json", "gridded/cog/TMP.tif"]))
+    assert (link["type"], link["s3"], link["truncated"]) == ("inode/directory", DIR, False)
+    paths = {f["path"]: f for f in link["files"]}
+    assert set(paths) == {"manifest.json", "gridded/cog/TMP.tif"}
+    assert paths["gridded/cog/TMP.tif"]["href"].startswith(
+        "https://s3.example.org/my-bucket/job-done/job-done-step-to-cng-1/cng/gridded/cog/TMP.tif?")
+    assert paths["manifest.json"]["size"] == 10
+
+
+def test_a_long_directory_listing_is_truncated():
+    from hydrowf_ogc import downloads
+    link = result_link(DIR, presigner_listing([f"f{n}.csv" for n in range(downloads.MAX_LISTED + 5)]))
+    assert len(link["files"]) == downloads.MAX_LISTED and link["truncated"] is True
+
+
+def test_a_directory_that_cannot_be_listed_still_answers():
+    from botocore.exceptions import EndpointConnectionError
+    link = result_link(DIR, presigner_listing(error=EndpointConnectionError(endpoint_url="http://minio:9000")))
+    assert link["s3"] == DIR and link["files"] == [] and "can't be listed" in link["error"]
+
+
+def test_without_downloads_every_output_is_its_s3_address():
+    assert result_link(DIR, None) == {"href": DIR}
+
+
+def test_listing_uses_the_internal_endpoint(monkeypatch):
+    from hydrowf_ogc.downloads import presigner, presigner_from
+    presigner.cache_clear()
+    monkeypatch.setenv("HYDROWF_S3_ACCESS_KEY", "reader")
+    monkeypatch.setenv("HYDROWF_S3_SECRET_KEY", "secret")
+    monkeypatch.delenv("HYDROWF_S3_PUBLIC_ENDPOINT", raising=False)
+    monkeypatch.setenv("HYDROWF_S3_INTERNAL_ENDPOINT", "http://minio:9000")
+    p = presigner_from({"endpoint": "https://s3.example.org"})
+    assert p.client.meta.endpoint_url == "https://s3.example.org"         # links: what clients reach
+    assert p.lister.meta.endpoint_url == "http://minio:9000"              # listing: what we reach
+
+
+def test_listed_paths_with_odd_characters_stay_paths():
+    odd = ["a b.csv", "q?x=1.csv", "frag#1.csv", "café.csv", "folder marker/"]
+    link = result_link(DIR, presigner_listing(odd))
+    paths = {f["path"]: f["href"] for f in link["files"]}
+    assert set(paths) == {"a b.csv", "q?x=1.csv", "frag#1.csv", "café.csv"}     # the marker isn't a file
+    for path, href in paths.items():
+        before_query = href.split("?X-Amz-", 1)[0]                     # the signature's own query string
+        assert before_query.startswith("https://s3.example.org/my-bucket/job-done/job-done-step-to-cng-1/cng/")
+        assert "?" not in before_query and "#" not in before_query and " " not in before_query
+
+
+def test_every_page_of_a_listing_is_read():
+    link = result_link(DIR, presigner_listing([f"f{n}.csv" for n in range(10)]))
+    assert len(link["files"]) == 10 and link["truncated"] is False
+
+
+def test_a_compressed_file_is_typed_by_its_compression():
+    link = result_link("s3://my-bucket/job-done/job-done-step-x-1/out/data.tar.gz", presigner_listing())
+    assert link["type"] == "application/gzip"

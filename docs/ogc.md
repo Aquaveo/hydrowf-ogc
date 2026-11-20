@@ -37,15 +37,24 @@ The image bakes in [pygeoapi-config.yml](../pygeoapi-config.yml), which is the *
 | `HYDROWF_OIDC_ISSUER`, `HYDROWF_OIDC_AUDIENCE` | Bearer tokens (see below). Without the issuer, only the catalogue is open and every job route is 401 |
 | `HYDROWF_ARGO_HOST`, `HYDROWF_ARGO_TOKEN` | Another Argo server than the config's |
 | `HYDROWF_S3_ACCESS_KEY`, `HYDROWF_S3_SECRET_KEY`, `HYDROWF_S3_PUBLIC_ENDPOINT` | Presigned result links, when the config has `downloads` |
+| `HYDROWF_S3_INTERNAL_ENDPOINT` | Where this service reaches S3 to list a directory output's files (default: the public endpoint) |
 | `HYDROWF_REGISTRY_URL` | hydrowf-registry's URL: the processes are then its public pipelines (see below), not the config's |
 | `FORWARDED_ALLOW_IPS` | The ingress addresses whose `X-Forwarded-*` headers uvicorn trusts (`--proxy-headers`) |
 
 Job results are `s3://` links unless the manager config has a `downloads` section
-([downloads.py](../src/hydrowf_ogc/downloads.py)); with it, each result's `href` is a presigned
-HTTPS GET that expires, and `s3` keeps the address another pipeline takes as an input (a read-only
-key is enough). On kind, mount a copy of the config with `downloads: {endpoint: http://localhost:9000}`
-and port-forward `svc/minio` to 9000. Only the service keeps those links from anonymous callers, so
-never turn `downloads` on under plain `pygeoapi serve`.
+([downloads.py](../src/hydrowf_ogc/downloads.py)); with it, `href`s are presigned HTTPS GETs that
+expire, and `s3` keeps the address another pipeline takes as an input. How an output looks depends on
+how its data lego stores it (`archive`, hydrowf-core):
+
+| Stored as | `s3` | In the results |
+|---|---|---|
+| one `.tgz` (`archive: tgz`, e.g. `ngen-run`; and every output of jobs from before files) | `…/ngen-run.tgz` | one `href`, `type: application/gzip` |
+| a file (the default, `archive: none`) | `…/<output>/<file name>` | one `href`, typed by the file name |
+| a directory of files (the default) | `…/<output>/` | `files`: each file's `path`, `size` and `href`, at most 1000 (`truncated` says if there were more); `error` if they can't be listed |
+
+The key needs GetObject, and ListBucket for directories. On kind, mount a copy of the config with
+`downloads: {endpoint: http://localhost:9000}` and port-forward `svc/minio` to 9000. Only the service
+keeps those links from anonymous callers, so never turn `downloads` on under plain `pygeoapi serve`.
 
 pygeoapi's API and the manager are built once, at startup: a manager config that is wrong
 (`downloads`, `shared_inputs`, `retention`) stops the service there, before any request. The OpenAPI
@@ -111,7 +120,10 @@ without an owner (e.g. under `pygeoapi serve`) refuses.
 Inputs are checked too, since Argo reads them with the cluster's credentials: a file or directory
 input must be an output of one of the caller's own jobs, or under a `shared_inputs` prefix of the
 manager config (`[hydrofabric/]` here). A key in another bucket, or with characters other than
-`A-Z a-z 0-9 . _ / -`, is `400`; any other key is `403`, and nothing is submitted.
+`A-Z a-z 0-9 . _ / -`, is `400`; any other key is `403`, and nothing is submitted. An input is one
+output (`<job>/<pod>/<output>`, a `.tgz`, a file or a directory ending in `/`) or something below a
+shared prefix: never a whole job, a whole step or a whole shared prefix, which would stage all of it
+into one pod.
 
 ## Dismissing a job
 

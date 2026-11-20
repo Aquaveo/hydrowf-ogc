@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import math
+import mimetypes
 import os
 import re
 import threading
@@ -44,6 +45,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
+from botocore.exceptions import BotoCoreError, ClientError
 from hera.exceptions import NotFound
 from pygeoapi.process.base import (BaseProcessor, JobNotFoundError, JobResultNotFoundError,
                                    ProcessorExecuteError, UnknownProcessError)
@@ -120,18 +122,36 @@ def job_dict(run: RunStatus) -> dict:
 
 
 def result_link(s3_url: str, presigner: Presigner | None) -> dict:
-    """One output in a job's results: an OGC link object for the s3://<bucket>/<key> .tgz.
+    """One output in a job's results, for its s3://<bucket>/<key>; s3 is the lasting address another
+    pipeline takes as an input, and every href downloads (presigned: it expires).
 
-    href downloads it (presigned, it expires); s3 is the lasting address another pipeline takes as
-    an input. presigner is None when the manager config has no `downloads` section: the link is then
-    the s3:// URL alone, as before downloads existed.
+    - <key>.tgz (data stored with archive: tgz, and every output of jobs from before files): one link.
+    - <key>/ (a directory stored as files): its files, each with a link, at most MAX_LISTED of them;
+      `truncated` says whether there were more. If they can't be listed, `error` says so.
+    - any other key (a file stored as itself): one link, typed by its file name.
+
+    presigner is None when the manager config has no `downloads` section: the link is then the s3://
+    URL alone, as before downloads existed.
     """
     if presigner is None:
         return {"href": s3_url}
-    # every output is a file or directory Argo archives with its default (.tgz): render() sets no other
-    return {"href": presigner.url(s3_url), "type": "application/gzip", "s3": s3_url}
+    if s3_url.endswith(".tgz"):
+        return {"href": presigner.url(s3_url), "type": "application/gzip", "s3": s3_url}
+    if s3_url.endswith("/"):
+        link = {"s3": s3_url, "type": "inode/directory"}
+        try:
+            files, truncated = presigner.list(s3_url)
+        except (BotoCoreError, ClientError) as err:      # S3 unreachable or refusing: the rest still answers
+            LOGGER.warning("listing %s: %s", s3_url, err)
+            return {**link, "files": [], "error": "the files can't be listed right now"}
+        return {**link, "truncated": truncated,
+                "files": [{"path": path, "size": size, "href": presigner.url(s3_url + path)} for path, size in files]}
+    kind, encoding = mimetypes.guess_type(s3_url.rsplit("/", 1)[-1])
+    kind = COMPRESSED.get(encoding) or kind or "application/octet-stream"   # x.tar.gz is gzip, not a tar
+    return {"href": presigner.url(s3_url), "type": kind, "s3": s3_url}
 
 
+COMPRESSED = {"gzip": "application/gzip", "bzip2": "application/x-bzip2", "xz": "application/x-xz"}
 KEY_CHARS = re.compile(r"[A-Za-z0-9._/-]+")   # no {{ }}: Argo expands them in the artifact key it reads
 
 
@@ -284,11 +304,15 @@ class ArgoManager(BaseManager):
                                               "your jobs nor a shared input")
 
     def _may_read(self, key: str, me: str) -> bool:
-        if key.startswith(self.shared_inputs):
+        """Something below a shared prefix (never the whole prefix), or one output of one of `me`'s jobs:
+        <job>/<pod>/<output>[/...], never a whole job or a whole step, which would stage every output
+        (and the logs) into one pod."""
+        if any(key.startswith(prefix) and len(key.rstrip("/")) >= len(prefix) for prefix in self.shared_inputs):
             return True
-        job, slash, _ = key.partition("/")
-        if not (slash and JOB_NAME.fullmatch(job)):  # never ask Argo about a name it can't have
+        parts = key.rstrip("/").split("/")
+        if len(parts) < 3 or not JOB_NAME.fullmatch(parts[0]):  # never ask Argo about a name it can't have
             return False
+        job = parts[0]
         try:
             run = self.runtime.status(job)
         except NotFound:                           # a deleted job's outputs are nobody's
