@@ -3,10 +3,10 @@
     uvicorn --factory hydrowf_platform.ogc:app_from_env --host 0.0.0.0 --port 8000 --proxy-headers
 
 Reads PYGEOAPI_CONFIG like pygeoapi does (the OpenAPI document is generated from it at startup, so it
-names the running PYGEOAPI_SERVER_URL), and HYDROWF_OIDC_ISSUER and HYDROWF_OIDC_AUDIENCE for bearer
-tokens (hydrowf_core.auth; without an issuer, only the open reads work). The routes live under
-the path of server.url (http://<host>/ogc serves /ogc/processes etc.), since pygeoapi builds every
-link as server.url + "/processes":
+names the running PYGEOAPI_SERVER_URL, and the processes of that moment), and HYDROWF_OIDC_ISSUER and
+HYDROWF_OIDC_AUDIENCE for bearer tokens (hydrowf_core.auth; without an issuer, only the open reads work).
+The routes live under the path of server.url (http://<host>/ogc serves /ogc/processes etc.), since
+pygeoapi builds every link as server.url + "/processes":
 
     GET    /  /conformance  /openapi  /processes  /processes/{id}   open: anyone may read the catalogue
     POST   /processes/{id}/execution                                 a bearer token: the job is theirs

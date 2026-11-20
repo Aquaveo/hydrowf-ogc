@@ -23,23 +23,30 @@ pygeoapi config:
           downloads: {endpoint: https://s3.example.org}   # presigned result links: see downloads.py
           shared_inputs: [hydrofabric/]            # key prefixes every caller may pass as an input
           retention: {days: 30}                    # a finished job and its outputs are deleted after (default 30)
+          registry: {url: http://hydrowf-registry:8000, ttl: 60}   # processes from the registry: see registry.py
         output_dir: /tmp                           # required by pygeoapi's schema; unused
+
+With `registry` (or HYDROWF_REGISTRY_URL), the processes are the registry's public pipelines, each version
+as `<id>@<version>` and the latest as `<id>`; the config's process resources are then not used.
 
 The Argo token comes from HYDROWF_ARGO_TOKEN, never from the config file.
 """
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from hera.exceptions import NotFound
 from pygeoapi.process.base import (BaseProcessor, JobNotFoundError, JobResultNotFoundError,
-                                   ProcessorExecuteError)
+                                   ProcessorExecuteError, UnknownProcessError)
 from pygeoapi.process.manager.base import BaseManager
 from pygeoapi.util import DATETIME_FORMAT, JobStatus
 
@@ -48,6 +55,7 @@ from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
 from hydrowf_platform import caller
 from hydrowf_platform.downloads import Presigner, presigner_from, split_s3_url
 from hydrowf_platform.processor import PipelineProcessor
+from hydrowf_platform.registry import RegistryProcesses, RemoteRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -135,6 +143,7 @@ def clean_key(key: str) -> bool:
 
 
 KEEP_DAYS = 30
+REGISTRY_TTL = 60                          # seconds a registry snapshot is served before a refresh
 
 
 def keep_days(retention: object) -> int:
@@ -146,6 +155,23 @@ def keep_days(retention: object) -> int:
     if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= MAX_KEEP_DAYS:
         raise ValueError(f"retention: {retention!r} is not {{days: <whole number of days, 1 to {MAX_KEEP_DAYS}>}}")
     return days
+
+
+def registry_from(section: object, fetch: Any = None) -> RemoteRegistry | None:
+    """The config's `registry: {url, ttl}` (HYDROWF_REGISTRY_URL overrides the url); None without a url,
+    and the processes then come from the config's resources. ValueError for a section that isn't one."""
+    section = section or {}
+    if not isinstance(section, dict) or not set(section) <= {"url", "ttl"}:
+        raise ValueError(f"registry: {section!r} is not {{url: <hydrowf-registry URL>, ttl: <seconds>}}")
+    url = os.environ.get("HYDROWF_REGISTRY_URL") or section.get("url")
+    if not url:
+        return None
+    if not isinstance(url, str) or urlsplit(url).scheme not in ("http", "https") or not urlsplit(url).hostname:
+        raise ValueError(f"registry: url {url!r} is not an http(s) URL")
+    ttl = section.get("ttl", REGISTRY_TTL)
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or ttl < 1:
+        raise ValueError(f"registry: ttl {ttl!r} is not a number of seconds, at least 1")
+    return RemoteRegistry(url, ttl, fetch) if fetch else RemoteRegistry(url, ttl)
 
 
 def shared_prefixes(value: object) -> tuple[str, ...]:
@@ -170,7 +196,19 @@ def job_lookup(job_id: str) -> Iterator[None]:
 
 
 class ArgoManager(BaseManager):
+    # pygeoapi's execute_process keeps the processor it runs on the manager (self.processor), set and
+    # read back within one call. One manager serves every request thread, so a shared attribute would let
+    # two concurrent executions swap processors: here it is per thread.
+    @property
+    def processor(self) -> BaseProcessor | None:
+        return getattr(self._per_thread, "processor", None)
+
+    @processor.setter
+    def processor(self, processor: BaseProcessor | None) -> None:
+        self._per_thread.processor = processor
+
     def __init__(self, manager_def: dict):
+        self._per_thread = threading.local()
         super().__init__(manager_def)
         self.is_async = True
         self.supports_subscribing = False
@@ -187,6 +225,17 @@ class ArgoManager(BaseManager):
             verify_ssl=argo.get("verify_ssl", True),
         )
         self.presigner: Presigner | None = manager_def.get("presigner") or presigner_from(argo.get("downloads"))
+        self.registry = registry_from(argo.get("registry"), manager_def.get("registry_fetch"))
+        if self.registry:                          # the processes come from hydrowf-registry, not resources
+            self.processes = RegistryProcesses(self.registry)
+
+    def get_processor(self, process_id: str) -> BaseProcessor:
+        if not self.registry:
+            return super().get_processor(process_id)
+        snapshot = self.registry.snapshot()
+        if process_id not in snapshot.processes:
+            raise UnknownProcessError("Invalid process identifier")
+        return PipelineProcessor.from_legos(process_id, snapshot.processes[process_id], snapshot.legos)
 
     # ---- execute: render and submit, nothing stored here
 
