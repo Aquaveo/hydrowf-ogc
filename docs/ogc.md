@@ -38,6 +38,8 @@ The image bakes in [pygeoapi-config.yml](../pygeoapi-config.yml), which is the *
 | `HYDROWF_ARGO_HOST`, `HYDROWF_ARGO_TOKEN` | Another Argo server than the config's |
 | `HYDROWF_S3_ACCESS_KEY`, `HYDROWF_S3_SECRET_KEY`, `HYDROWF_S3_PUBLIC_ENDPOINT` | Presigned result links, when the config has `downloads` |
 | `HYDROWF_S3_INTERNAL_ENDPOINT` | Where this service reaches S3 to list a directory output's files (default: the public endpoint) |
+| `HYDROWF_S3_READER_ACCESS_KEY`, `HYDROWF_S3_READER_SECRET_KEY` | kind: the read-only S3 user read keys are issued from (`credentials`, below). On EKS leave them unset: the pod's IAM role is used |
+| `HYDROWF_STS_ENDPOINT` | Another STS than the config's `credentials.sts_endpoint` (kind: RustFS's own; on AWS omit it) |
 | `HYDROWF_REGISTRY_URL` | hydrowf-registry's URL: the processes are then its public pipelines (see below), not the config's |
 | `FORWARDED_ALLOW_IPS` | The ingress addresses whose `X-Forwarded-*` headers uvicorn trusts (`--proxy-headers`) |
 
@@ -98,7 +100,7 @@ config's resources, as before.
 |---|---|---|
 | `/ogc`, `/ogc/conformance`, `/ogc/openapi`, `/ogc/processes`, `/ogc/processes/{id}` | GET | anyone (the catalogue) |
 | `/ogc/processes/{id}/execution` | POST | a bearer token; the job is the token's owner's |
-| `/ogc/jobs`, `/ogc/jobs/{id}`, `/ogc/jobs/{id}/results` | GET | a bearer token; the owner's jobs only |
+| `/ogc/jobs`, `/ogc/jobs/{id}`, `/ogc/jobs/{id}/results`, `/ogc/jobs/{id}/credentials` | GET | a bearer token; the owner's jobs only |
 | `/ogc/jobs/{id}` | DELETE | a bearer token; the owner's job only |
 
 Any other method is 405. A request is authenticated before anything else is read. Only a POST's
@@ -118,6 +120,38 @@ decides who a request acts as:
 401s carry `WWW-Authenticate: Bearer`, with `error="invalid_token"` when a token was sent. A string
 that isn't a JWT is refused without asking the issuer for keys. A key set that is reachable but empty
 is a 401 too (PyJWT can't tell it from an unknown key id), logged as a warning.
+
+## Read keys for a job's outputs
+
+Cloud-native outputs are meant to be read in place (range requests), not downloaded. A presigned link
+covers one object, which is enough for a COG or a Parquet file; a Zarr store or a folder of files needs
+S3 keys. `GET /ogc/jobs/{id}/credentials` gives the job's owner keys that may only **read** that job's
+outputs (the keys Argo recorded, never anything the caller names) for **15 minutes**
+([credentials.py](../src/hydrowf_ogc/credentials.py); design: hydrowf-core
+`docs/design/formats-and-data-inputs.md`, Part D):
+
+```json
+{"access_key_id": "...", "secret_access_key": "...", "session_token": "...", "expiration": "2026-11-20T22:00:00+00:00",
+ "endpoint": "http://localhost:9000", "region": "us-east-1", "bucket": "my-bucket",
+ "prefixes": ["<job>/<pod>/cng/"]}
+```
+
+```python
+storage_options = {"key": c["access_key_id"], "secret": c["secret_access_key"], "token": c["session_token"],
+                   "client_kwargs": {"endpoint_url": c["endpoint"], "region_name": c["region"]}}
+xr.open_zarr(f"s3://{c['bucket']}/{c['prefixes'][0]}timeseries/troute.zarr", storage_options=storage_options,
+             consolidated=False)      # our stores have no consolidated metadata: don't look for it
+```
+
+They come from S3 STS (`AssumeRole` with a session policy: GetObject on the outputs, ListBucket only under
+them). Their parent is a read-only identity, so a session can never write: on kind, the RustFS user
+`hydrowf-reader` (hydrowf-deploy `local/s3-reader.sh`); on EKS, the pod's IAM role, allowed to assume a
+role that may only read the bucket. Only outputs under the job's own keys (`<job>/<pod>/<output>` in this
+bucket) are covered: an output Argo recorded elsewhere (a tool or a workflow editor could forge one) gets
+no keys at all. Every answer of the route is `Cache-Control: no-store`, and `HEAD` is refused. Someone
+else's job, a job that hasn't succeeded, or a service without a `credentials` section is `404`; an STS that
+can't be reached, or refuses, is `503`. `endpoint` is the config's `credentials.endpoint`, else the
+downloads endpoint; `region` is the config's (sessions can't look up a bucket's region).
 
 ## Job owners
 
@@ -220,6 +254,8 @@ tokens for two clients A and B (client credentials, audience mapper):
 | B executes with an output of A's job as an input | 403 |
 | A executes with `{{workflow.name}}` as the feature | 400 |
 | A `GET …/results` of a finished job | 200; presigned links |
+| A `GET …/credentials` of a finished job (B: the same job) | 200, `no-store`, keys scoped to its 2 outputs, 15 min (B: 404) |
+| xarray + s3fs with only those keys | opens `timeseries/troute.zarr` in place and reads it; listing another prefix or the bucket, and writing, are denied |
 | A `DELETE` on A's job while its first step runs | 200; the workflow is terminated, then gone in about 35 s, 0 objects left |
 | `/ogc/openapi` | `servers` names the running `PYGEOAPI_SERVER_URL` |
 | anonymous `POST …/execution` with a 2 MB body | 401 (refused before the body is read) |
@@ -262,6 +298,10 @@ Verified earlier through the Tethys portal, with the same manager code:
 - **Items live in job results only.** There is no STAC catalog or search yet: an Item is reached through
   its job, and only by the job's owner. Its download links expire like the others; its `s3`
   alternates last until the job is deleted. A bbox that crosses the antimeridian is refused.
+- **Read keys are verified on RustFS (kind), not yet on AWS S3.** A session may list only under the job's
+  outputs, and S3 answers a read of a *missing* key with 404 only to callers that may list the bucket; AWS
+  may answer 403 instead, which s3fs and Zarr treat as an error, not as "missing". Zarr leaves empty chunks
+  out. Test a sparse Zarr (and `consolidated=False`) on real S3 before EKS relies on this.
 - **Runs from before formats follow the data lego's latest version.** A run records the data lego
   version of each output (`hydrowf/formats`), and its Item follows that version. Older runs, and runs
   whose recorded version is no longer offered, use the latest STAC version of the data lego instead.

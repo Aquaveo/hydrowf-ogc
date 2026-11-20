@@ -24,6 +24,7 @@ pygeoapi config:
           shared_inputs: [hydrofabric/]            # key prefixes every caller may pass as an input
           retention: {days: 30}                    # a finished job and its outputs are deleted after (default 30)
           registry: {url: http://hydrowf-registry:8000, ttl: 60}   # processes from the registry: see registry.py
+          credentials: {role_arn: arn:aws:iam::0:role/reader}     # read keys for a job's outputs: see credentials.py
         output_dir: /tmp                           # required by pygeoapi's schema; unused
 
 With `registry` (or HYDROWF_REGISTRY_URL), the processes are the registry's public pipelines, each version
@@ -60,6 +61,7 @@ from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
 from hydrowf_core.models import Pipeline
 from hydrowf_core.models.lego import DataLego, Lego, Port, StacStorage
 from hydrowf_ogc import caller, stac
+from hydrowf_ogc.credentials import Vendor, vendor_from
 from hydrowf_ogc.downloads import Presigner, TooLarge, clean_key, presigner_from, split_s3_url
 from hydrowf_ogc.processor import PipelineProcessor
 from hydrowf_ogc.registry import RegistryError, RegistryProcesses, RemoteRegistry
@@ -71,6 +73,10 @@ class BadExecuteRequest(ProcessorExecuteError):
     """The inputs don't fit the pipeline (HTTP 400 instead of pygeoapi's default 500)."""
     http_status_code = 400
     ogc_exception_code = "InvalidParameterValue"
+
+
+class CredentialsUnavailable(Exception):
+    """No read keys for this job (none offered, or its outputs can't be scoped): a 404."""
 
 
 class ForbiddenInput(ProcessorExecuteError):
@@ -243,6 +249,7 @@ class ArgoManager(BaseManager):
         )
         self.presigner: Presigner | None = manager_def.get("presigner") or presigner_from(argo.get("downloads"))
         self.registry = registry_from(argo.get("registry"), manager_def.get("registry_fetch"))
+        self.vendor: Vendor | None = manager_def.get("vendor") or vendor_from(argo.get("credentials"))
         if self.registry:                          # the processes come from hydrowf-registry, not resources
             self.processes = RegistryProcesses(self.registry)
 
@@ -378,6 +385,40 @@ class ArgoManager(BaseManager):
             if name in data and url.endswith("/"):
                 results[name].update(self.item_for(run, name, url, data[name]))
         return MIMETYPE, results
+
+    def get_job_credentials(self, job_id: str) -> dict:
+        """Read keys for the caller's succeeded job's outputs (credentials.py): short-lived, read-only, and
+        scoped to the output keys Argo recorded, never to anything the caller names. JobNotFoundError for
+        someone else's job, JobResultNotFoundError before it succeeds; CredentialsUnavailable when the
+        service offers none, or for a job whose outputs can't be scoped."""
+        if self.vendor is None:
+            raise CredentialsUnavailable("this service hands out no read keys (no `credentials` section)")
+        run = self._run(job_id)
+        if run.phase != "Succeeded":
+            raise JobResultNotFoundError(f"job {job_id} is {run.phase}")
+        keys = [self._own_key(run, url) for url in self.runtime.outputs(job_id).values()]
+        if not keys:
+            raise CredentialsUnavailable(f"job {job_id} has no outputs to read")
+        try:
+            issued = self.vendor.issue(self.bucket, keys, session=f"job-{job_id}")
+        except ValueError as err:
+            raise CredentialsUnavailable(str(err)) from err
+        endpoint = self.vendor.endpoint or (self.presigner.client.meta.endpoint_url if self.presigner else None)
+        return {**issued, "endpoint": endpoint, "region": self.vendor.region, "bucket": self.bucket,
+                "prefixes": keys}
+
+    def _own_key(self, run: RunStatus, url: str) -> str:
+        """The key of one of `run`'s outputs, if it lies where this job's outputs are written: in our bucket,
+        under <job>/<pod>/<output>, a plain key. Argo records output keys from the pods' reports, which a
+        tool or anyone who may edit workflows could forge; read keys must never cover another job's data."""
+        try:
+            bucket, key = split_s3_url(url)
+        except ValueError as err:
+            raise CredentialsUnavailable(f"job {run.name}: an output isn't an s3:// URL") from err
+        if bucket != self.bucket or not clean_key(key) or not key.startswith(f"{run.name}/") \
+                or len(key.rstrip("/").split("/")) < 3:
+            raise CredentialsUnavailable(f"job {run.name}: an output lies outside the job's own keys")
+        return key
 
     def pipeline_legos(self, pipeline_id: str, version: str) -> tuple[Pipeline, list[Lego]] | None:
         """The pipeline a run was rendered from (its hydrowf/pipeline and hydrowf/version labels) and the
