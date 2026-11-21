@@ -185,12 +185,15 @@ ingress may route. It gives keys only when every check holds:
 Every refusal is the same `403 refused` (the reason is logged); a body that isn't a token never reaches the
 API server; an API server, Argo or STS that can't be reached is `503`, which the init container retries.
 
-**Trust boundary.** In the workflows' namespace, these rights would each let someone get another job's
-keys, so only hydrowf-ogc's service account (and cluster admins) may hold them, and the tools' service
-account (`default`) none: create workflows (they could write any `hydrowf/reads`); create pods (a
-look-alike can't take a running step's pod name, but could wait for one); `pods/exec` (into a step's init
-container); create `serviceaccounts/token`. The vendor needs create TokenReviews and get pods
-(hydrowf-deploy). The token and the keys cross the pod network in plain HTTP: keep port 8001 reachable
+**Trust boundary.** In the workflows' namespace, each of these rights would let someone get another job's
+keys, and the tools' service account (`default`) holds none of them (executor and artifactgc only):
+create workflows (they could write any `hydrowf/reads`), which only hydrowf-ogc does, through argo-server
+with the identity behind `HYDROWF_ARGO_TOKEN`; create pods (a look-alike can't take a running step's pod
+name, but could wait for one), which only Argo's controller does; `pods/exec` (into a step's init
+container) and create `serviceaccounts/token`, which only cluster admins have. Nor may that account have
+an IAM role (IRSA or Pod Identity) that reaches the bucket: every container in a pod shares it, the tool's
+included, so Argo's artifact repository uses a key in a Secret, which Argo hands only to its own
+containers. The vendor's own account needs only create TokenReviews and get pods (hydrowf-deploy). The token and the keys cross the pod network in plain HTTP: keep port 8001 reachable
 only from the workflows' namespace (a NetworkPolicy), or put it behind a mesh with TLS.
 
 ## Job owners
