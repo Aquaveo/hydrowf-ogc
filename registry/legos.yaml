@@ -497,3 +497,152 @@
   outputs:
     run: {step: run, output: ngen_run}
     cng: {step: to-cng, output: cng}
+
+# ---- TEEHR evaluation (hydrowf-core docs/design/teehr-evaluation.md)
+
+# What an evaluation reads; any model's tool can write it (ngiab-to-cng --format teehr-timeseries for NextGen):
+# manifest.json, timeseries/secondary.parquet (TEEHR's schema and names), crosswalk.parquet (to usgs-<site>)
+- kind: data
+  id: teehr-timeseries
+  version: 1.0.0
+  title: Simulated time series for evaluation, with a crosswalk to USGS gages (TEEHR schema)
+  data_kind: output
+  storage: {driver: stac, format: other}
+
+# teehr-evaluate's output: metrics.parquet, locations.parquet (the gages, GeoParquet) and manifest.json
+- kind: data
+  id: teehr-metrics
+  version: 1.0.0
+  title: TEEHR metrics per gage and configuration, and the gages evaluated
+  data_kind: output
+  storage: {driver: stac, format: other}
+
+# 0.4.0: --format writes ngen-cng (as 0.3.0) or teehr-timeseries (hydrowf-tools nextgen/ngiab-to-cng)
+- kind: tool
+  id: ngiab-to-cng
+  version: 0.4.0
+  title: NGIAB run to cloud-native files, or to TEEHR time series for evaluation
+  image: ghcr.io/aquaveo/ngiab-to-cng@sha256:953ea53082e82c73431b1e33e52497fde8a2bbb6d16edaa7ab67932c10122b8f   # 0.4.0
+  command: [python, /app/ngiab_to_cng.py]
+  args:
+    - "{ngen_run}"
+    - --output
+    - "{workdir}/ngen-run_cng"
+    - --run-id
+    - "{run}"
+    - --configuration-name
+    - "{configuration_name}"
+    - --format
+    - "{cng_format}"
+  inputs:
+    - {name: ngen_run, type: directory, data: ngen-run, path: ngen-run}
+    - {name: configuration_name, type: string, default: ngiab, pattern: '[A-Za-z0-9][A-Za-z0-9_-]*',
+       description: TEEHR configuration name}
+  outputs:
+    - {name: cng, type: directory, formats: [ngen-cng, teehr-timeseries], path: ngen-run_cng}
+  cpu: 1
+  ram_mb: 2048
+
+# From hydrowf-tools evaluation/teehr-evaluate. `command` is the image's whole ENTRYPOINT: entrypoint.sh gives
+# a uid the image doesn't name a user name, which Spark's Hadoop needs. Needs the internet (USGS, NOAA).
+- kind: tool
+  id: teehr-evaluate
+  version: 0.1.0
+  title: Evaluate simulated time series against USGS observations (TEEHR)
+  image: ghcr.io/aquaveo/teehr-evaluate@sha256:f220a40eda744089893a4eb35f7b6e5cea8747d8f175f3dd52d7c2fb9dad5915   # 0.1.0
+  command: [/app/entrypoint.sh, python, /app/teehr_evaluate.py]
+  args:
+    - "{timeseries}"
+    - --output
+    - "{workdir}/evaluation"
+    - --run-id
+    - "{run}"
+    - --metrics
+    - "{metrics}"
+    - --baseline
+    - "{baseline}"
+  inputs:
+    - {name: timeseries, type: dataset, data: teehr-timeseries}          # read in place with the step's keys
+    - {name: metrics, type: string, default: "kge,nse,relative_bias,rmsdr",
+       pattern: '(kge|kge_mod1|kge_mod2|nse|nnse|relative_bias|rmsdr|rmse|mae|pearson|r2|annual_peak_relative_bias)(,(kge|kge_mod1|kge_mod2|nse|nnse|relative_bias|rmsdr|rmse|mae|pearson|r2|annual_peak_relative_bias))*',
+       description: "distinct names, comma-separated, from kge, kge_mod1, kge_mod2, nse, nnse, relative_bias, rmsdr, rmse, mae, pearson, r2, annual_peak_relative_bias"}
+    - {name: baseline, type: enum, symbols: [none, nwm30_retrospective], default: none,
+       description: "nwm30_retrospective also evaluates the NWM 3.0 retrospective at the same gages (1979-02 to 2023-01)"}
+  outputs:
+    - {name: evaluation, type: directory, data: teehr-metrics, path: evaluation}
+  env:                                    # on the workdir, render's emptyDir: not the container's own layer
+    HOME: "{workdir}"                     # entrypoint.sh's passwd file, Spark's and Java's home
+    TMPDIR: "{workdir}"                   # the TEEHR evaluation's temporary folder
+  network: true
+  cpu: 2
+  # measured on kind with a one-gage input: 3.1 GiB peak, 3.6 GiB with the NWM baseline (Spark's JVM and
+  # Python's libraries, not the data); 4096 was OOMKilled (the pod's limit counts page cache too)
+  ram_mb: 6144
+
+- kind: pipeline
+  id: ngiab-evaluation
+  version: 0.1.0
+  title: Preprocess, run NextGen, evaluate it against USGS observations (TEEHR)
+  inputs:
+    - {name: feature, type: string}
+    - {name: start_date, type: string}
+    - {name: end_date, type: string}
+    - {name: hydrofabric, type: file, data: hydrofabric-gpkg}
+    - {name: hydrofabric_graph, type: file, data: hydrofabric-graph, optional: true,
+       description: "without it, the preprocessor builds the graph from the gpkg"}
+    - {name: configuration_name, type: string, default: ngiab_cfe_default,
+       description: "the simulation's name in the metrics; not usgs_observations or nwm30_retrospective (TEEHR's own)"}
+    - {name: metrics, type: string, default: "kge,nse,relative_bias,rmsdr",
+       description: "distinct names, comma-separated, from kge, kge_mod1, kge_mod2, nse, nnse, relative_bias, rmsdr, rmse, mae, pearson, r2, annual_peak_relative_bias"}
+    - {name: baseline, type: enum, symbols: [none, nwm30_retrospective], default: none,
+       description: "nwm30_retrospective also evaluates the NWM 3.0 retrospective at the same gages (1979-02 to 2023-01)"}
+  steps:
+    - name: preprocess
+      tool: {id: ngiab-preprocess, version: 4.9.5}
+      inputs:
+        hydrofabric: {input: hydrofabric}
+        hydrofabric_graph: {input: hydrofabric_graph}
+        feature: {input: feature}
+        start_date: {input: start_date}
+        end_date: {input: end_date}
+    - name: run
+      tool: {id: ngiab-run, version: 2.1.0}
+      inputs:
+        ngen_run: {step: preprocess, output: ngen_run}
+    - name: to-teehr
+      tool: {id: ngiab-to-cng, version: 0.4.0}
+      formats: {cng: teehr-timeseries}
+      inputs:
+        ngen_run: {step: run, output: ngen_run}
+        configuration_name: {input: configuration_name}
+    - name: evaluate                      # reads to-teehr's output in place (hydrowf-core design D.7)
+      tool: {id: teehr-evaluate, version: 0.1.0}
+      inputs:
+        timeseries: {step: to-teehr, output: cng}
+        metrics: {input: metrics}
+        baseline: {input: baseline}
+  outputs:
+    run: {step: run, output: ngen_run}
+    timeseries: {step: to-teehr, output: cng}
+    evaluation: {step: evaluate, output: evaluation}
+
+- kind: pipeline
+  id: teehr-evaluation
+  version: 0.1.0
+  title: Evaluate an earlier job's simulated time series against USGS observations (TEEHR)
+  inputs:
+    - {name: timeseries, type: dataset, data: teehr-timeseries,
+       description: "the timeseries output of an earlier ngiab-evaluation job of yours (or any teehr-timeseries)"}
+    - {name: metrics, type: string, default: "kge,nse,relative_bias,rmsdr",
+       description: "distinct names, comma-separated, from kge, kge_mod1, kge_mod2, nse, nnse, relative_bias, rmsdr, rmse, mae, pearson, r2, annual_peak_relative_bias"}
+    - {name: baseline, type: enum, symbols: [none, nwm30_retrospective], default: none,
+       description: "nwm30_retrospective also evaluates the NWM 3.0 retrospective at the same gages (1979-02 to 2023-01)"}
+  steps:
+    - name: evaluate
+      tool: {id: teehr-evaluate, version: 0.1.0}
+      inputs:
+        timeseries: {input: timeseries}
+        metrics: {input: metrics}
+        baseline: {input: baseline}
+  outputs:
+    evaluation: {step: evaluate, output: evaluation}
