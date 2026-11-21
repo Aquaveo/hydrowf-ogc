@@ -20,6 +20,10 @@ pygeoapi config, under server.manager.connection:
       endpoint: https://s3.example.org     # the S3 address clients use (default: downloads' endpoint)
       duration: 900                        # seconds: 15 minutes (STS's minimum; role chaining caps it at 3600)
       region: us-east-1                    # the bucket's region; readers pass it (sessions can't look it up)
+      steps:                               # read keys for steps that read in place (stepkeys.py, Part D.4)
+        vendor_url: http://hydrowf-ogc.hydrowf.svc:8001/step-keys   # what step pods reach (internal port)
+        init_image: curlimages/curl@sha256:...                       # any image with curl, pinned
+        s3_endpoint: http://minio.argo.svc:9000                      # what step pods reach S3 at
 
 Without the section, the credentials route answers 404.
 """
@@ -41,6 +45,12 @@ SESSION_NAME = re.compile(r"[^\w+=,.@-]", re.ASCII)   # characters STS refuses i
 
 class IssuerUnavailable(Exception):
     """STS can't be reached, or refuses (e.g. a role the service may not assume): keys can't be issued now."""
+
+
+def policy_fits(bucket: str, keys: list[str]) -> bool:
+    """Whether STS takes the session policy for `keys` (checked when a job is submitted, so a step that
+    reads too many keys fails then, not when it starts)."""
+    return len(json.dumps(session_policy(bucket, keys), separators=(",", ":"))) <= MAX_POLICY
 
 
 def session_policy(bucket: str, keys: list[str]) -> dict:
@@ -66,15 +76,18 @@ class Vendor:
             raise ValueError(f"credentials: duration {duration!r} is not 900 to 3600 seconds")
         self.sts, self.role_arn, self.duration, self.region, self.endpoint = sts, role_arn, duration, region, endpoint
 
-    def issue(self, bucket: str, keys: list[str], session: str) -> dict:
-        """Keys that may read `keys` in `bucket` for `duration` seconds. ValueError when the policy is over
-        STS's size limit (too many outputs); IssuerUnavailable when STS can't be reached or refuses."""
+    def issue(self, bucket: str, keys: list[str], session: str, seconds: int | None = None) -> dict:
+        """Keys that may read `keys` in `bucket` for `seconds` (default: `duration`). ValueError when the policy
+        is over STS's size limit (too many outputs); IssuerUnavailable when STS can't be reached or refuses."""
+        seconds = self.duration if seconds is None else seconds
+        if not 900 <= seconds <= 3600:
+            raise ValueError(f"{seconds} seconds is not 900 to 3600")
         policy = json.dumps(session_policy(bucket, keys), separators=(",", ":"))
         if len(policy) > MAX_POLICY:
             raise ValueError(f"{len(keys)} outputs need a session policy over {MAX_POLICY} characters")
         try:
             found = self.sts.assume_role(RoleArn=self.role_arn, RoleSessionName=SESSION_NAME.sub("-", session)[:64],
-                                         Policy=policy, DurationSeconds=self.duration)["Credentials"]
+                                         Policy=policy, DurationSeconds=seconds)["Credentials"]
         except (BotoCoreError, ClientError) as err:
             raise IssuerUnavailable(str(err)) from err
         return {"access_key_id": found["AccessKeyId"], "secret_access_key": found["SecretAccessKey"],
@@ -86,7 +99,7 @@ def vendor_from(section: object) -> Vendor | None:
     section that isn't one, at startup."""
     if section is None:
         return None
-    fields = {"role_arn", "sts_endpoint", "endpoint", "duration", "region"}
+    fields = {"role_arn", "sts_endpoint", "endpoint", "duration", "region", "steps"}
     if not isinstance(section, dict) or not set(section) <= fields:
         raise ValueError(f"credentials: {section!r} is not {{{', '.join(sorted(fields))}}}")
     for name in ("sts_endpoint", "endpoint", "region"):
@@ -109,6 +122,6 @@ def vendor_from(section: object) -> Vendor | None:
     botocore_log.setLevel(max(botocore_log.getEffectiveLevel(), logging.INFO))
     sts = boto3.session.Session().client(
         "sts", endpoint_url=os.environ.get("HYDROWF_STS_ENDPOINT") or section.get("sts_endpoint"),
-        region_name=section.get("region", "us-east-1"),
+        region_name=section.get("region") or "us-east-1",
         config=Config(connect_timeout=5, read_timeout=15, retries={"total_max_attempts": 2}), **keys)
-    return Vendor(sts, role_arn, duration, section.get("region", "us-east-1"), section.get("endpoint"))
+    return Vendor(sts, role_arn, duration, section.get("region") or "us-east-1", section.get("endpoint"))

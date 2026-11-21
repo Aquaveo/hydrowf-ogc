@@ -43,6 +43,6 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYGEOAPI_SERVER_URL=http://localhost:8000/ogc
 WORKDIR /opt/hydrowf
 USER 10001
-EXPOSE 8000
-CMD ["uvicorn", "--factory", "hydrowf_ogc.app:app_from_env", "--host", "0.0.0.0", "--port", "8000", \
-     "--proxy-headers"]
+EXPOSE 8000 8001
+# 8000: the public OGC API; 8001: the step-key vendor, for step pods only (only when credentials.steps is set)
+CMD ["python", "-m", "hydrowf_ogc.serve"]

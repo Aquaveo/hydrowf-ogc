@@ -40,8 +40,10 @@ The image bakes in [pygeoapi-config.yml](../pygeoapi-config.yml), which is the *
 | `HYDROWF_S3_INTERNAL_ENDPOINT` | Where this service reaches S3 to list a directory output's files (default: the public endpoint) |
 | `HYDROWF_S3_READER_ACCESS_KEY`, `HYDROWF_S3_READER_SECRET_KEY` | kind: the read-only S3 user read keys are issued from (`credentials`, below). On EKS leave them unset: the pod's IAM role is used |
 | `HYDROWF_STS_ENDPOINT` | Another STS than the config's `credentials.sts_endpoint` (kind: RustFS's own; on AWS omit it) |
+| `HYDROWF_K8S_API`, `HYDROWF_K8S_TOKEN_FILE`, `HYDROWF_K8S_CA_FILE` | The step-key vendor's Kubernetes API access outside the cluster (kind, the service in Docker); in the cluster the pod's own service account is used |
+| `PORT`, `VENDOR_PORT` | The public API's port (8000) and the step-key vendor's (8001; only with `credentials.steps`) |
 | `HYDROWF_REGISTRY_URL` | hydrowf-registry's URL: the processes are then its public pipelines (see below), not the config's |
-| `FORWARDED_ALLOW_IPS` | The ingress addresses whose `X-Forwarded-*` headers uvicorn trusts (`--proxy-headers`) |
+| `FORWARDED_ALLOW_IPS` | The ingress addresses whose `X-Forwarded-*` headers the public port trusts (the vendor's port trusts none) |
 
 Job results are `s3://` links unless the manager config has a `downloads` section
 ([downloads.py](../src/hydrowf_ogc/downloads.py)); with it, `href`s are presigned HTTPS GETs that
@@ -152,6 +154,44 @@ no keys at all. Every answer of the route is `Cache-Control: no-store`, and `HEA
 else's job, a job that hasn't succeeded, or a service without a `credentials` section is `404`; an STS that
 can't be reached, or refuses, is `503`. `endpoint` is the config's `credentials.endpoint`, else the
 downloads endpoint; `region` is the config's (sessions can't look up a bucket's region).
+
+## Steps that read in place (the step-key vendor)
+
+With `credentials.steps` in the manager config, a pipeline's dataset ports read the bucket in place:
+a managed data lego, or a dataset input given as one of the caller's own job outputs (checked like file
+inputs: ownership and recorded type). render gives such a step an init container that trades the pod's
+projected service-account token for read keys, and the tool reads with them (hydrowf-core
+`docs/design/formats-and-data-inputs.md`, Part D.4):
+
+```yaml
+credentials:
+  role_arn: arn:aws:iam::0:role/hydrowf-reader
+  steps:
+    vendor_url: http://<this service, as step pods reach it>:8001/step-keys
+    init_image: curlimages/curl@sha256:...       # any image with curl, pinned
+    s3_endpoint: http://minio.argo.svc:9000      # S3 as step pods reach it
+```
+
+The vendor ([stepkeys.py](../src/hydrowf_ogc/stepkeys.py)) listens on `VENDOR_PORT` (8001), which no
+ingress may route. It gives keys only when every check holds:
+- the token passes a TokenReview for the audience `hydrowf-vendor` only (the pod's default service-account
+  token, which the tool can see, doesn't), and names a pod of the workflows' namespace whose uid matches;
+- the pod's controlling owner is the Workflow its label names, by that workflow's uid;
+- the workflow carries hydrowf-ogc's labels (owner, pipeline) and is still running, and the pod is the
+  very pod Argo made for one step of it (the name Argo derives for the step's node, which is Pending or
+  Running): a pod built to look like the step can't take that name while the real one exists;
+- the keys are that step's `hydrowf/reads`, recorded by render and checked again; they last 1 hour.
+
+Every refusal is the same `403 refused` (the reason is logged); a body that isn't a token never reaches the
+API server; an API server, Argo or STS that can't be reached is `503`, which the init container retries.
+
+**Trust boundary.** In the workflows' namespace, these rights would each let someone get another job's
+keys, so only hydrowf-ogc's service account (and cluster admins) may hold them, and the tools' service
+account (`default`) none: create workflows (they could write any `hydrowf/reads`); create pods (a
+look-alike can't take a running step's pod name, but could wait for one); `pods/exec` (into a step's init
+container); create `serviceaccounts/token`. The vendor needs create TokenReviews and get pods
+(hydrowf-deploy). The token and the keys cross the pod network in plain HTTP: keep port 8001 reachable
+only from the workflows' namespace (a NetworkPolicy), or put it behind a mesh with TLS.
 
 ## Job owners
 

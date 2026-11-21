@@ -34,6 +34,7 @@ The Argo token comes from HYDROWF_ARGO_TOKEN, never from the config file.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import mimetypes
@@ -55,13 +56,13 @@ from pygeoapi.process.base import (BaseProcessor, JobNotFoundError, JobResultNot
 from pygeoapi.process.manager.base import BaseManager
 from pygeoapi.util import DATETIME_FORMAT, JobStatus
 
-from hydrowf_core.adapters.argo import (FILE_TYPES, MAX_KEEP_DAYS, BadInputs, UnsupportedForArgo, latest_data,
-                                        output_formats, render)
+from hydrowf_core.adapters.argo import (FILE_TYPES, MAX_KEEP_DAYS, BadInputs, Reader, UnsupportedForArgo,
+                                        latest_data, output_formats, render)
 from hydrowf_core.adapters.argo_runtime import ArgoRuntime, RunStatus
 from hydrowf_core.models import Pipeline
 from hydrowf_core.models.lego import DataLego, Lego, Port, StacStorage
 from hydrowf_ogc import caller, stac
-from hydrowf_ogc.credentials import Vendor, vendor_from
+from hydrowf_ogc.credentials import Vendor, policy_fits, vendor_from
 from hydrowf_ogc.downloads import Presigner, TooLarge, clean_key, presigner_from, split_s3_url
 from hydrowf_ogc.processor import PipelineProcessor
 from hydrowf_ogc.registry import RegistryError, RegistryProcesses, RemoteRegistry
@@ -169,6 +170,18 @@ KEEP_DAYS = 30
 REGISTRY_TTL = 60                          # seconds a registry snapshot is served before a refresh
 
 
+def reader_from(section: object, bucket: str, vendor: Vendor | None) -> Reader | None:
+    """The Reader render gives steps that read the bucket in place, from credentials.steps; None without it
+    (such pipelines are then refused). ValueError for a section that isn't one, at startup."""
+    if section is None:
+        return None
+    fields = {"vendor_url", "init_image", "s3_endpoint"}
+    if vendor is None or not isinstance(section, dict) or not set(section) <= fields:
+        raise ValueError(f"credentials.steps: {section!r} is not {{vendor_url, init_image, s3_endpoint}}")
+    return Reader(image=section.get("init_image", ""), vendor_url=section.get("vendor_url", ""), bucket=bucket,
+                  s3_endpoint=section.get("s3_endpoint", ""), region=vendor.region)
+
+
 def keep_days(retention: object) -> int:
     """The config's retention.days: how long a finished job and its outputs are kept. ValueError when
     the section isn't {days: <whole number of days, 1 to MAX_KEEP_DAYS>}."""
@@ -250,6 +263,9 @@ class ArgoManager(BaseManager):
         self.presigner: Presigner | None = manager_def.get("presigner") or presigner_from(argo.get("downloads"))
         self.registry = registry_from(argo.get("registry"), manager_def.get("registry_fetch"))
         self.vendor: Vendor | None = manager_def.get("vendor") or vendor_from(argo.get("credentials"))
+        self.namespace: str = argo.get("namespace", "argo")
+        self.reader: Reader | None = manager_def.get("reader") or reader_from(
+            (argo.get("credentials") or {}).get("steps"), self.bucket, self.vendor)
         if self.registry:                          # the processes come from hydrowf-registry, not resources
             self.processes = RegistryProcesses(self.registry)
 
@@ -268,10 +284,14 @@ class ArgoManager(BaseManager):
         if not isinstance(p, PipelineProcessor):
             raise ProcessorExecuteError(user_msg=f"{p!r} is not a PipelineProcessor")
         try:
-            workflow = render(p.pipeline, p.legos, data_dict, self.entrypoints.get, name=job_id,
+            workflow = render(p.pipeline, p.legos, data_dict, self.entrypoints.get, name=job_id, reader=self.reader,
                               labels={caller.OWNER_LABEL: caller.owner()}, keep_days=self.keep_days)
         except (BadInputs, UnsupportedForArgo) as err:
             raise BadExecuteRequest(user_msg=str(err)) from err
+        for step, keys in json.loads(workflow["metadata"]["annotations"].get("hydrowf/reads", "{}")).items():
+            if not policy_fits(self.bucket, keys):
+                raise BadExecuteRequest(user_msg=f"step {step} reads {len(keys)} keys in place: more than one "
+                                                 "step's read keys can cover")
         self.check_inputs(p, data_dict)
         self.runtime.submit(workflow)
         return MIMETYPE, None, JobStatus.accepted
@@ -282,7 +302,7 @@ class ArgoManager(BaseManager):
         return self._execute_handler_async(p, job_id, data_dict, *args, **kwargs)
 
     def check_inputs(self, p: PipelineProcessor, data_dict: dict) -> None:
-        """Every file or directory input the caller passed is theirs to read.
+        """Every file, directory or dataset input the caller passed is theirs to read.
 
         Argo reads inputs with the cluster's own credentials, so this is the only thing between a
         caller and any key in the bucket. A key may be the output of one of the caller's jobs (Argo
@@ -292,7 +312,7 @@ class ArgoManager(BaseManager):
         me = caller.owner()
         for port in p.pipeline.inputs:
             url = data_dict.get(port.name)
-            if url is None or port.type not in FILE_TYPES:
+            if url is None or (port.type not in FILE_TYPES and port.type != "dataset"):   # a dataset: read in place
                 continue
             try:
                 bucket, key = split_s3_url(url)
