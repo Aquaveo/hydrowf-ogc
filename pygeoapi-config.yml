@@ -15,7 +15,9 @@ server:
   encoding: utf-8
   languages: [en-US]
   limits:
-    default_items: 10
+    # every process in one page: pygeoapi's /processes gives no `next` link, so a client asking without
+    # `limit` would silently miss processes past the first page (14 with the TEEHR pipelines)
+    default_items: 100
     max_items: 100
   map:
     url: https://tile.openstreetmap.org/{z}/{x}/{y}.png
