@@ -18,9 +18,9 @@ EVALUATION = {"feature": "gage-01031510", "start_date": "2020-06-01", "end_date"
 EARLIER = "s3://my-bucket/job-0/to-teehr/cng/"              # where an ngiab-evaluation job writes it (core D.7)
 
 
-def rendered(pipeline_id, inputs, **kw):
+def rendered(pipeline_id, inputs, version="0.1.0", **kw):
     legos = load_legos(SHIPPED)                  # runs hydrowf_core.registry.check on the whole file
-    return render(find_pipeline(legos, pipeline_id, "0.1.0"), legos, inputs, lambda image: None,
+    return render(find_pipeline(legos, pipeline_id, version), legos, inputs, lambda image: None,
                   **{"name": "job-1", "reader": READER, **kw})
 
 
@@ -100,9 +100,68 @@ def test_teehr_evaluate_works_on_its_own_workdir():
     assert env["HOME"] == env["TMPDIR"] == "/work"                    # render's emptyDir, not /tmp in the image
 
 
+@pytest.mark.parametrize("version", ["0.1.0", "0.2.0"])
 @pytest.mark.parametrize("pipeline_id", ["ngiab-evaluation", "teehr-evaluation"])
-def test_the_process_description_shows_the_metrics_pattern_and_the_baselines(pipeline_id):
+def test_the_process_description_shows_the_metrics_pattern_and_the_baselines(pipeline_id, version):
     legos = load_legos(SHIPPED)
-    inputs = process_description(find_pipeline(legos, pipeline_id, "0.1.0"), legos)["inputs"]
+    inputs = process_description(find_pipeline(legos, pipeline_id, version), legos)["inputs"]
     assert inputs["metrics"]["schema"]["pattern"].startswith("^(?:(kge|kge_mod1|")
     assert inputs["baseline"]["schema"]["enum"] == ["none", "nwm30_retrospective"]
+
+
+# ---- 0.2.0: ngiab-to-cng 0.4.1 (refuses TEEHR's own configuration names) and teehr-evaluate 0.1.1 (drops a
+# repeated metric); the 0.1.0 pipelines above stay as published
+
+def image(workflow, step):
+    return template(workflow, step)["container"]["image"]
+
+
+def test_the_0_2_0_pipelines_run_the_follow_up_tools():
+    ngiab = rendered("ngiab-evaluation", EVALUATION, version="0.2.0")
+    assert image(ngiab, "to-teehr").endswith("@sha256:71fb90d98d8b86181804288701396afee6726b6241ff637559e662d8d5c3d4ae")
+    teehr = rendered("teehr-evaluation", {"timeseries": EARLIER}, version="0.2.0")
+    assert image(ngiab, "evaluate") == image(teehr, "evaluate")
+    assert image(teehr, "evaluate") != image(rendered("teehr-evaluation", {"timeseries": EARLIER}), "evaluate")
+
+
+@pytest.mark.parametrize("name", ["usgs_observations", "nwm30_retrospective", "cfe", "Ngiab", "ngiab cfe"])
+def test_ngiab_evaluation_0_2_0_refuses_a_name_not_starting_with_ngiab_at_submission(name):
+    with pytest.raises(BadInputs):                     # render refuses before any step exists: NextGen never runs
+        rendered("ngiab-evaluation", {**EVALUATION, "configuration_name": name}, version="0.2.0")
+
+
+@pytest.mark.parametrize("name", ["ngiab", "ngiab_cfe_default", "ngiab-cfe-v2"])
+def test_ngiab_evaluation_0_2_0_passes_an_ngiab_name_to_the_tool(name):
+    args = template(rendered("ngiab-evaluation", {**EVALUATION, "configuration_name": name}, version="0.2.0"),
+                    "to-teehr")["container"]["args"]
+    assert args[args.index("--configuration-name") + 1] == name
+
+
+def test_a_repeated_metric_is_accepted_and_left_to_the_tool_to_drop():
+    # the contract teehr-evaluate 0.1.1 relies on: the registry doesn't refuse a repeat; the tool drops it
+    args = template(rendered("teehr-evaluation", {"timeseries": EARLIER, "metrics": "kge,nse,kge"}, version="0.2.0"),
+                    "evaluate")["container"]["args"]
+    assert args[args.index("--metrics") + 1] == "kge,nse,kge"
+
+
+def test_the_process_description_shows_both_configuration_name_patterns():
+    legos = load_legos(SHIPPED)
+    schema = process_description(find_pipeline(legos, "ngiab-evaluation", "0.2.0"), legos)["inputs"][
+        "configuration_name"]["schema"]
+    assert schema["allOf"] == [{"pattern": "^(?:ngiab[A-Za-z0-9_-]*)$"}, {"pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]*)$"}]
+
+
+def same_but_version(lego):
+    """A tool lego without what a release changes: its version, its image and its ports' descriptions."""
+    dumped = lego.model_dump(exclude={"version", "image"})
+    for port in dumped["inputs"] + dumped["outputs"]:
+        port.pop("description", None)
+    return dumped
+
+
+@pytest.mark.parametrize("tool_id, published, follow_up", [("ngiab-to-cng", "0.4.0", "0.4.1"),
+                                                           ("teehr-evaluate", "0.1.0", "0.1.1")])
+def test_a_follow_up_tool_changes_only_its_image(tool_id, published, follow_up):
+    tools = {(x.id, x.version): x for x in load_legos(SHIPPED) if x.kind == "tool"}
+    assert same_but_version(tools[tool_id, published]) == same_but_version(tools[tool_id, follow_up])
+    assert tools[tool_id, published].image != tools[tool_id, follow_up].image
