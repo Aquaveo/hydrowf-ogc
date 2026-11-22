@@ -498,7 +498,7 @@
     run: {step: run, output: ngen_run}
     cng: {step: to-cng, output: cng}
 
-# ---- TEEHR evaluation (hydrowf-core docs/design/teehr-evaluation.md)
+# ---- TEEHR evaluation (hydrowf-tools docs/design/teehr-evaluation.md)
 
 # What an evaluation reads; any model's tool can write it (ngiab-to-cng --format teehr-timeseries for NextGen):
 # manifest.json, timeseries/secondary.parquet (TEEHR's schema and names), crosswalk.parquet (to usgs-<site>)

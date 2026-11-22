@@ -1,4 +1,4 @@
-"""TEEHR evaluation in the shipped registry (hydrowf-core docs/design/teehr-evaluation.md): ngiab-to-cng 0.4.0
+"""TEEHR evaluation in the shipped registry (hydrowf-tools docs/design/teehr-evaluation.md): ngiab-to-cng 0.4.0
 writes teehr-timeseries, teehr-evaluate reads it in place, from the step before it (ngiab-evaluation) or from
 a caller's earlier job (teehr-evaluation)."""
 import json
