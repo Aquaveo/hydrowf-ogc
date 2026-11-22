@@ -646,3 +646,136 @@
         baseline: {input: baseline}
   outputs:
     evaluation: {step: evaluate, output: evaluation}
+
+# ---- TEEHR follow-ups: the 0.1.0 pipelines above stay as published (their tools refuse a repeated metric)
+
+# 0.4.1: refuses a --configuration-name TEEHR uses for its own data, in either format, before converting
+- kind: tool
+  id: ngiab-to-cng
+  version: 0.4.1
+  title: NGIAB run to cloud-native files, or to TEEHR time series for evaluation
+  image: ghcr.io/aquaveo/ngiab-to-cng@sha256:71fb90d98d8b86181804288701396afee6726b6241ff637559e662d8d5c3d4ae   # 0.4.1
+  command: [python, /app/ngiab_to_cng.py]
+  args:
+    - "{ngen_run}"
+    - --output
+    - "{workdir}/ngen-run_cng"
+    - --run-id
+    - "{run}"
+    - --configuration-name
+    - "{configuration_name}"
+    - --format
+    - "{cng_format}"
+  inputs:
+    - {name: ngen_run, type: directory, data: ngen-run, path: ngen-run}
+    - {name: configuration_name, type: string, default: ngiab, pattern: '[A-Za-z0-9][A-Za-z0-9_-]*',
+       description: "TEEHR configuration name; usgs_observations and nwm30_retrospective (TEEHR's own) are refused"}
+  outputs:
+    - {name: cng, type: directory, formats: [ngen-cng, teehr-timeseries], path: ngen-run_cng}
+  cpu: 1
+  ram_mb: 2048
+
+# 0.1.1: a repeated metric is dropped (the first kept), not refused: the pattern can't exclude repeats
+- kind: tool
+  id: teehr-evaluate
+  version: 0.1.1
+  title: Evaluate simulated time series against USGS observations (TEEHR)
+  image: ghcr.io/aquaveo/teehr-evaluate@sha256:3e0a61cfcdf8a9d7338759e2044202b2652465c077ac9da735d4376e1796e443   # 0.1.1
+  command: [/app/entrypoint.sh, python, /app/teehr_evaluate.py]
+  args:
+    - "{timeseries}"
+    - --output
+    - "{workdir}/evaluation"
+    - --run-id
+    - "{run}"
+    - --metrics
+    - "{metrics}"
+    - --baseline
+    - "{baseline}"
+  inputs:
+    - {name: timeseries, type: dataset, data: teehr-timeseries}          # read in place with the step's keys
+    - {name: metrics, type: string, default: "kge,nse,relative_bias,rmsdr",
+       pattern: '(kge|kge_mod1|kge_mod2|nse|nnse|relative_bias|rmsdr|rmse|mae|pearson|r2|annual_peak_relative_bias)(,(kge|kge_mod1|kge_mod2|nse|nnse|relative_bias|rmsdr|rmse|mae|pearson|r2|annual_peak_relative_bias))*',
+       description: "comma-separated, from kge, kge_mod1, kge_mod2, nse, nnse, relative_bias, rmsdr, rmse, mae, pearson, r2, annual_peak_relative_bias; a repeated name is dropped"}
+    - {name: baseline, type: enum, symbols: [none, nwm30_retrospective], default: none,
+       description: "nwm30_retrospective also evaluates the NWM 3.0 retrospective at the same gages (1979-02 to 2023-01)"}
+  outputs:
+    - {name: evaluation, type: directory, data: teehr-metrics, path: evaluation}
+  env:                                    # as 0.1.0: on the workdir, render's emptyDir
+    HOME: "{workdir}"
+    TMPDIR: "{workdir}"
+  network: true
+  cpu: 2
+  ram_mb: 6144                            # as 0.1.0: 3.6 GiB measured at peak with the NWM baseline
+
+# 0.2.0: ngiab-to-cng 0.4.1 and teehr-evaluate 0.1.1. configuration_name starts with ngiab, so a job
+# naming the simulation as TEEHR's own data (usgs_observations, nwm30_retrospective) is refused when it
+# is submitted, not after NextGen has run (patterns run on Rust's regex: no lookarounds to exclude names)
+- kind: pipeline
+  id: ngiab-evaluation
+  version: 0.2.0
+  title: Preprocess, run NextGen, evaluate it against USGS observations (TEEHR)
+  inputs:
+    - {name: feature, type: string}
+    - {name: start_date, type: string}
+    - {name: end_date, type: string}
+    - {name: hydrofabric, type: file, data: hydrofabric-gpkg}
+    - {name: hydrofabric_graph, type: file, data: hydrofabric-graph, optional: true,
+       description: "without it, the preprocessor builds the graph from the gpkg"}
+    - {name: configuration_name, type: string, default: ngiab_cfe_default, pattern: 'ngiab[A-Za-z0-9_-]*',
+       description: "the simulation's name in the metrics, starting with ngiab (so it can't be usgs_observations or nwm30_retrospective, TEEHR's own)"}
+    - {name: metrics, type: string, default: "kge,nse,relative_bias,rmsdr",
+       description: "comma-separated, from kge, kge_mod1, kge_mod2, nse, nnse, relative_bias, rmsdr, rmse, mae, pearson, r2, annual_peak_relative_bias; a repeated name is dropped"}
+    - {name: baseline, type: enum, symbols: [none, nwm30_retrospective], default: none,
+       description: "nwm30_retrospective also evaluates the NWM 3.0 retrospective at the same gages (1979-02 to 2023-01)"}
+  steps:
+    - name: preprocess
+      tool: {id: ngiab-preprocess, version: 4.9.5}
+      inputs:
+        hydrofabric: {input: hydrofabric}
+        hydrofabric_graph: {input: hydrofabric_graph}
+        feature: {input: feature}
+        start_date: {input: start_date}
+        end_date: {input: end_date}
+    - name: run
+      tool: {id: ngiab-run, version: 2.1.0}
+      inputs:
+        ngen_run: {step: preprocess, output: ngen_run}
+    - name: to-teehr
+      tool: {id: ngiab-to-cng, version: 0.4.1}
+      formats: {cng: teehr-timeseries}
+      inputs:
+        ngen_run: {step: run, output: ngen_run}
+        configuration_name: {input: configuration_name}
+    - name: evaluate                      # reads to-teehr's output in place (hydrowf-core design D.7)
+      tool: {id: teehr-evaluate, version: 0.1.1}
+      inputs:
+        timeseries: {step: to-teehr, output: cng}
+        metrics: {input: metrics}
+        baseline: {input: baseline}
+  outputs:
+    run: {step: run, output: ngen_run}
+    timeseries: {step: to-teehr, output: cng}
+    evaluation: {step: evaluate, output: evaluation}
+
+# 0.2.0: teehr-evaluate 0.1.1
+- kind: pipeline
+  id: teehr-evaluation
+  version: 0.2.0
+  title: Evaluate an earlier job's simulated time series against USGS observations (TEEHR)
+  inputs:
+    - {name: timeseries, type: dataset, data: teehr-timeseries,
+       description: "the timeseries output of an earlier ngiab-evaluation job of yours (or any teehr-timeseries)"}
+    - {name: metrics, type: string, default: "kge,nse,relative_bias,rmsdr",
+       description: "comma-separated, from kge, kge_mod1, kge_mod2, nse, nnse, relative_bias, rmsdr, rmse, mae, pearson, r2, annual_peak_relative_bias; a repeated name is dropped"}
+    - {name: baseline, type: enum, symbols: [none, nwm30_retrospective], default: none,
+       description: "nwm30_retrospective also evaluates the NWM 3.0 retrospective at the same gages (1979-02 to 2023-01)"}
+  steps:
+    - name: evaluate
+      tool: {id: teehr-evaluate, version: 0.1.1}
+      inputs:
+        timeseries: {input: timeseries}
+        metrics: {input: metrics}
+        baseline: {input: baseline}
+  outputs:
+    evaluation: {step: evaluate, output: evaluation}

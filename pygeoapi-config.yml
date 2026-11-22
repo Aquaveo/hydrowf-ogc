@@ -16,7 +16,7 @@ server:
   languages: [en-US]
   limits:
     # every process in one page: pygeoapi's /processes gives no `next` link, so a client asking without
-    # `limit` would silently miss processes past the first page (14 with the TEEHR pipelines)
+    # `limit` would silently miss processes past the first page
     default_items: 100
     max_items: 100
   map:
@@ -72,3 +72,18 @@ resources:
       name: hydrowf_ogc.processor.PipelineProcessor
       registry: ${HYDROWF_REGISTRY:-registry/legos.yaml}
       pipeline: {id: ngiab-rerun, version: 0.1.0}
+  # The TEEHR pipelines read a step's output in place, with keys from the step-key vendor: they run only
+  # with `credentials.steps` in the manager's connection (docs/ogc.md, "Steps that read in place");
+  # without it, every execution is refused (400)
+  ngiab-evaluation:
+    type: process
+    processor:
+      name: hydrowf_ogc.processor.PipelineProcessor
+      registry: ${HYDROWF_REGISTRY:-registry/legos.yaml}
+      pipeline: {id: ngiab-evaluation, version: 0.2.0}
+  teehr-evaluation:
+    type: process
+    processor:
+      name: hydrowf_ogc.processor.PipelineProcessor
+      registry: ${HYDROWF_REGISTRY:-registry/legos.yaml}
+      pipeline: {id: teehr-evaluation, version: 0.2.0}
