@@ -42,7 +42,7 @@ The image bakes in [pygeoapi-config.yml](../pygeoapi-config.yml), which is the *
 | `HYDROWF_STS_ENDPOINT` | Another STS than the config's `credentials.sts_endpoint` (kind: RustFS's own; on AWS omit it) |
 | `HYDROWF_K8S_API`, `HYDROWF_K8S_TOKEN_FILE`, `HYDROWF_K8S_CA_FILE` | The step-key vendor's Kubernetes API access outside the cluster (kind, the service in Docker); in the cluster the pod's own service account is used |
 | `PORT`, `VENDOR_PORT` | The public API's port (8000) and the step-key vendor's (8001; only with `credentials.steps`) |
-| `HYDROWF_REGISTRY_URL` | hydrowf-registry's URL: the processes are then its public pipelines (see below), not the config's |
+| `HYDROWF_REGISTRY_URL` | hydrowf-registry's URL: the processes are then its pipelines (see below), not the config's |
 | `FORWARDED_ALLOW_IPS` | The ingress addresses whose `X-Forwarded-*` headers the public port trusts (the vendor's port trusts none) |
 
 Job results are `s3://` links unless the manager config has a `downloads` section
@@ -91,10 +91,24 @@ registry while the others keep the current list. Before the first list, requests
 Every read is bounded: connecting takes at most the resolver's time plus 5 s per address and 5 s for TLS,
 and from then on a watchdog cuts the read at 15 s (request, headers and body alike). An answer is at most
 32 MB, http(s) only, with no redirects; one cut short is refused. The registry is reached directly: proxy
-variables (`HTTP(S)_PROXY`) aren't used, and a query string in its URL is dropped. Only public legos are
-used, whatever the registry answers. A pipeline published to the registry
-becomes runnable here within `ttl`, with no rebuild or restart. Without `registry`, the processes are the
-config's resources, as before.
+variables (`HTTP(S)_PROXY`) aren't used, and a query string in its URL is dropped. A pipeline published to
+the registry becomes runnable here within `ttl`, with no rebuild or restart. Without `registry`, the
+processes are the config's resources, as before.
+
+**A caller's own pipelines.** With a bearer token, even on the open catalogue routes, the registry is also
+read with the caller's token, as it answers them: public legos and their own. The caller then lists,
+describes and runs their private pipelines too; nobody else does.
+- **Ownership is checked here too.** A lego that isn't public is kept only when its `owner` is the
+  token's `sub`, whatever the registry answers.
+- **Caching.** Only the caller's own legos are kept, for `ttl` seconds, for at most 256 callers. They're
+  combined with the current public list on every request, so a public refresh reaches signed-in callers
+  at once.
+- **Latest version.** For an id with public and private versions, `<id>` is the latest of either.
+- **Refreshing and failures.** A refresh of a caller's view holds none of their requests up once they
+  have one. If the registry can't be read with their token (unreachable, or a 401 when the services'
+  audiences differ), their last view is served, or the public one before any, and the read is tried
+  again after 5 s. The token goes to the registry URL only; over `http://` it crosses the network
+  unencrypted, so keep that network private or use `https://`.
 
 ## Routes and who may call them
 
@@ -102,7 +116,7 @@ config's resources, as before.
 |---|---|---|
 | `/ogc`, `/ogc/conformance`, `/ogc/openapi`, `/ogc/processes`, `/ogc/processes/{id}` | GET | anyone (the catalogue) |
 | `/ogc/processes/{id}/execution` | POST | a bearer token; the job is the token's owner's |
-| `/ogc/jobs`, `/ogc/jobs/{id}`, `/ogc/jobs/{id}/results`, `/ogc/jobs/{id}/credentials` | GET | a bearer token; the owner's jobs only |
+| `/ogc/jobs`, `/ogc/jobs/{id}`, `/ogc/jobs/{id}/results`, `/ogc/jobs/{id}/credentials`, `/ogc/jobs/{id}/steps` | GET | a bearer token; the owner's jobs only |
 | `/ogc/jobs/{id}` | DELETE | a bearer token; the owner's job only |
 
 Any other method is 405. A request is authenticated before anything else is read. Only a POST's
@@ -122,6 +136,15 @@ decides who a request acts as:
 401s carry `WWW-Authenticate: Bearer`, with `error="invalid_token"` when a token was sent. A string
 that isn't a JWT is refused without asking the issuer for keys. A key set that is reachable but empty
 is a 401 too (PyJWT can't tell it from an unknown key id), logged as a warning.
+
+## Each step's status
+
+`GET /ogc/jobs/{id}/steps` answers `{"jobID", "steps": {<step>: <status>}}` for the caller's job, in the
+pipeline's step order. OGC API - Processes reports a job as a whole; this route is hydrowf's own. The
+statuses are the same words whatever runs the steps (Argo here, an HPC adapter later): `pending`,
+`running`, `successful`, `failed`, `skipped`. A step the runner never started is `pending` while the job
+runs and `skipped` once it has finished (a step before it failed). The plan comes from the job's pipeline
+in the registry; a pipeline no longer offered lists only the steps that ran.
 
 ## Read keys for a job's outputs
 
@@ -326,8 +349,10 @@ Verified earlier through the Tethys portal, with the same manager code:
   then refuse) is planned.
 - **Groups and admins.** A caller sees only their own jobs; sharing with a Keycloak group, or an
   admin who sees everyone's, comes with the authorization work.
-- **Only public pipelines.** With `registry` set, `/ogc` offers the registry's public pipelines only
-  (read anonymously); a caller's private pipelines would need the registry asked with their token.
+- **Group-visible pipelines.** The registry shows a caller their own legos and public ones; a
+  pipeline shared with a Keycloak group isn't offered to the group's members yet.
+- **The step plan comes from the registry.** `/jobs/{id}/steps` lists unstarted steps from the
+  pipeline the registry offers; taking it from the run itself (hydrowf-core's `plan(wf)`) needs a core change.
 - **New pipelines wait up to `ttl`** (60 s by default) to appear, and the OpenAPI document lists the
   processes of the moment the service started.
 - **`<id>` follows the latest version.** A caller who read `ngiab-simulation`'s description and then

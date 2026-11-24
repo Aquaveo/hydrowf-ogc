@@ -23,7 +23,7 @@ from hydrowf_core.models import LEGOS
 from hydrowf_ogc import app as service, caller
 from hydrowf_ogc.manager import ArgoManager, registry_from
 from hydrowf_ogc import registry as registry_module
-from hydrowf_ogc.registry import RegistryError, RemoteRegistry, fetch_public_legos
+from hydrowf_ogc.registry import RegistryError, RemoteRegistry, fetch_legos
 
 REPO = Path(__file__).parents[1]
 CONFIG = REPO / "pygeoapi-config.yml"
@@ -51,7 +51,7 @@ class FakeRegistry:
         self.down = False
         self.calls = 0
 
-    def __call__(self, url):
+    def __call__(self, url, token=None):
         self.calls += 1
         if self.down:
             raise OSError("connection refused")
@@ -393,7 +393,7 @@ def test_fetch_does_not_follow_redirects(server):
     routes["/legos"] = (302, {"Location": url + "/elsewhere"}, b"")
     routes["/elsewhere"] = (200, {}, json.dumps(SHIPPED).encode())
     with pytest.raises(RegistryError, match="answered 302"):
-        fetch_public_legos(url)
+        fetch_legos(url)
 
 
 def drip(payload, every=0.2):
@@ -437,7 +437,7 @@ def test_a_slow_registry_is_cut_at_the_deadline(server, monkeypatch, route):
     monkeypatch.setattr(registry_module, "DEADLINE", 0.5)
     started = time.monotonic()
     with pytest.raises(RegistryError, match="took over 0.5 s"):
-        fetch_public_legos(url)
+        fetch_legos(url)
     assert time.monotonic() - started < 2                     # the whole answer would take 20 s
 
 
@@ -446,12 +446,12 @@ def test_fetch_refuses_a_huge_answer(server, monkeypatch):
     routes["/legos"] = (200, {}, json.dumps(SHIPPED).encode())
     monkeypatch.setattr(registry_module, "MAX_BYTES", 1000)
     with pytest.raises(RegistryError, match="over 1000 bytes"):
-        fetch_public_legos(url)
+        fetch_legos(url)
 
 
 def test_fetch_refuses_urls_that_are_not_http():
     with pytest.raises(RegistryError, match="not http"):
-        fetch_public_legos("file:///etc")
+        fetch_legos("file:///etc")
 
 
 def test_an_answer_cut_short_is_refused(server):
@@ -464,7 +464,7 @@ def test_an_answer_cut_short_is_refused(server):
         request.wfile.write(b"[]")
     routes["/legos"] = short
     with pytest.raises(RegistryError, match="cut short"):
-        fetch_public_legos(url)
+        fetch_legos(url)
 
 
 def test_a_declared_answer_over_max_bytes_is_refused_before_reading(server, monkeypatch):
@@ -472,4 +472,4 @@ def test_a_declared_answer_over_max_bytes_is_refused_before_reading(server, monk
     routes["/legos"] = (200, {"Content-Length": "5000"}, b"[]" + b" " * 4998)
     monkeypatch.setattr(registry_module, "MAX_BYTES", 1000)
     with pytest.raises(RegistryError, match="over 1000 bytes"):
-        fetch_public_legos(url)
+        fetch_legos(url)
