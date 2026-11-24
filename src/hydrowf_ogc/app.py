@@ -12,16 +12,18 @@ pygeoapi builds every link as server.url + "/processes":
     POST   /processes/{id}/execution                                 a bearer token: the job is theirs
     GET    /jobs  /jobs/{id}  /jobs/{id}/results                     a bearer token: their jobs only
     GET    /jobs/{id}/credentials                                    read keys for their job's outputs (no-store)
+    GET    /jobs/{id}/steps                                          each step's status in their job
     DELETE /jobs/{id}
 
 API and its manager are built once, at startup (a bad manager config stops the service there).
 A request is authenticated before anything else is read; only a POST's body is read at all, counted as
 it streams in and refused past MAX_BODY bytes (no header is trusted for its size). Every request
 runs pygeoapi's handler in a worker thread, as the token's owner (hydrowf_ogc.caller): the
-owner is handed to the thread, not left in a context variable, because pygeoapi's own Starlette app
-(loop.run_in_executor) does not carry context variables into its threads. That is also why this is
-not pygeoapi.starlette_app with a middleware in front: it builds its API at import, serves collections,
-tiles and STAC, and would lose the owner on the way to the manager.
+owner (and the verified token, which the registry is read with) is handed to the thread, not left in a
+context variable, because pygeoapi's own Starlette app (loop.run_in_executor) does not carry context
+variables into its threads. That is also why this is not pygeoapi.starlette_app with a middleware in
+front: it builds its API at import, serves collections, tiles and STAC, and would lose the owner on the
+way to the manager.
 """
 from __future__ import annotations
 
@@ -125,17 +127,20 @@ def to_response(headers: dict, status: int, content: str | bytes | dict) -> Resp
 
 def endpoint(api: API, bearer: BearerAuth | None, functions: dict[str, ApiFunction], open_reads: bool):
     """The Starlette endpoint that runs functions[method] for the caller its token names."""
-    def call(function: ApiFunction, api_request: APIRequest, args: tuple, owner: str | None) -> Result:
+    def call(function: ApiFunction, api_request: APIRequest, args: tuple, owner: str | None,
+             token: str | None) -> Result:
         if owner is None:
             return function(api, api_request, *args)
-        with acting_as(owner):                         # set in the worker thread that runs the call
+        with acting_as(owner, token):                  # set in the worker thread that runs the call
             return function(api, api_request, *args)
 
     async def handle(request: Request) -> Response:
+        authorization = request.headers.get("Authorization")
         try:                                           # first: nothing is read for a caller we refuse
-            owner = await run_in_threadpool(caller_for, request.headers.get("Authorization"), bearer, open_reads)
+            owner = await run_in_threadpool(caller_for, authorization, bearer, open_reads)
         except Unauthorized as err:                    # (a thread: the token check may fetch the issuer's keys)
             return unauthorized(err)
+        token = bearer_token(authorization) if owner else None    # verified: the registry is read with it
         api_request = APIRequest(request, api.locales)  # not from_starlette: it reads any body, unbounded
         if request.method == "POST":                   # the only route that takes a body (execution)
             try:
@@ -146,7 +151,7 @@ def endpoint(api: API, bearer: BearerAuth | None, functions: dict[str, ApiFuncti
             return to_response(*api.get_format_exception(api_request))
         method = "GET" if request.method == "HEAD" else request.method
         args = tuple(request.path_params.values())     # process_id or job_id, in path order
-        return to_response(*await run_in_threadpool(call, functions[method], api_request, args, owner))
+        return to_response(*await run_in_threadpool(call, functions[method], api_request, args, owner, token))
 
     return handle
 
@@ -164,6 +169,16 @@ def job_credentials(api: API, api_request: APIRequest, job_id: str) -> Result:
     except IssuerUnavailable as err:                   # STS unreachable or refusing
         LOGGER.warning("credentials for %s: %s", job_id, err)
         return dict(NO_STORE), HTTPStatus.SERVICE_UNAVAILABLE, {"error": "read keys can't be issued right now"}
+
+
+def job_steps(api: API, api_request: APIRequest, job_id: str) -> Result:
+    """GET /jobs/{id}/steps: each step's status in the caller's job (ArgoManager.get_job_steps). Not
+    pygeoapi's: OGC API - Processes reports a job as a whole."""
+    headers = {"Content-Type": "application/json"}
+    try:
+        return headers, HTTPStatus.OK, api.manager.get_job_steps(job_id)
+    except JobNotFoundError as err:
+        return headers, HTTPStatus.NOT_FOUND, {"error": str(err)}
 
 
 def no_store(handle):
@@ -203,6 +218,7 @@ def create_app(config: dict, openapi: dict, bearer: BearerAuth | None) -> Starle
         route("/jobs/{job_id}/results", {"GET": processes_api.get_job_result}),
         Route(prefix + "/jobs/{job_id}/credentials", no_store(endpoint(api, bearer, {"GET": job_credentials}, False)),
               methods=["GET", "POST", "PUT", "PATCH", "DELETE"]),      # all answered (and no-store) by no_store
+        route("/jobs/{job_id}/steps", {"GET": job_steps}),
     ])
     app.state.api = api
     return app

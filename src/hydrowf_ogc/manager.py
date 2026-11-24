@@ -27,8 +27,10 @@ pygeoapi config:
           credentials: {role_arn: arn:aws:iam::0:role/reader}     # read keys for a job's outputs: see credentials.py
         output_dir: /tmp                           # required by pygeoapi's schema; unused
 
-With `registry` (or HYDROWF_REGISTRY_URL), the processes are the registry's public pipelines, each version
-as `<id>@<version>` and the latest as `<id>`; the config's process resources are then not used.
+With `registry` (or HYDROWF_REGISTRY_URL), the processes are the registry's pipelines, each version
+as `<id>@<version>` and the latest as `<id>`; the config's process resources are then not used. A caller
+sees and runs the public ones and their own (the registry read with their token: registry.py; over an
+http:// registry URL, that token crosses the cluster network unencrypted).
 
 The Argo token comes from HYDROWF_ARGO_TOKEN, never from the config file.
 """
@@ -96,6 +98,18 @@ STATUS = {                                    # Argo phase -> OGC job status
     "Succeeded": JobStatus.successful,
     "Failed": JobStatus.failed,
     "Error": JobStatus.failed,
+}
+
+
+# A step's status for clients: the same words whatever runs the steps (Argo here, an HPC adapter later)
+STEP_STATUS = {                               # Argo node phase -> step status
+    "Pending": "pending",
+    "Running": "running",
+    "Succeeded": "successful",
+    "Failed": "failed",
+    "Error": "failed",
+    "Skipped": "skipped",
+    "Omitted": "skipped",
 }
 
 
@@ -272,7 +286,7 @@ class ArgoManager(BaseManager):
     def get_processor(self, process_id: str) -> BaseProcessor:
         if not self.registry:
             return super().get_processor(process_id)
-        snapshot = self.registry.snapshot()
+        snapshot = self.registry.snapshot(*caller.identity())
         if process_id not in snapshot.processes:
             raise UnknownProcessError("Invalid process identifier")
         return PipelineProcessor.from_legos(process_id, snapshot.processes[process_id], snapshot.legos)
@@ -391,6 +405,20 @@ class ArgoManager(BaseManager):
         start = offset or 0
         return {"jobs": jobs[start:start + limit] if limit else jobs[start:], "numberMatched": len(jobs)}
 
+    def get_job_steps(self, job_id: str) -> dict:
+        """{"jobID", "steps": {step: status}} for the caller's job, statuses as STEP_STATUS words. Every step
+        of the job's pipeline is listed when the pipeline is still offered; a step the runner never started
+        is pending while the job runs, and skipped once it has finished (a step before it failed)."""
+        run = self._run(job_id)
+        found = self.pipeline_legos(run.pipeline, run.labels.get("hydrowf/version", ""))
+        planned = [step.name for step in found[0].steps] if found else []
+        never_ran = "skipped" if run.finished else "pending"
+        steps = {name: STEP_STATUS.get(run.steps[name], "pending") if name in run.steps else never_ran
+                 for name in planned}                             # in the pipeline's step order
+        steps.update({name: STEP_STATUS.get(phase, "pending") for name, phase in run.steps.items()
+                      if name not in steps})                      # planned unknown: the registry wasn't read
+        return {"jobID": job_id, "steps": steps}
+
     def get_job_result(self, job_id: str) -> tuple[str, Any]:
         """A link per output (result_link); a directory output whose data lego is `driver: stac` with
         `item_from` also gets its STAC `item`, or an `item_error` saying why there is none."""
@@ -445,7 +473,7 @@ class ArgoManager(BaseManager):
         legos it was checked with; None when it is no longer offered."""
         if self.registry:
             try:
-                snapshot = self.registry.snapshot()
+                snapshot = self.registry.snapshot(*caller.identity())
             except RegistryError as err:            # never read yet: results still answer, without Items
                 LOGGER.warning("no registry for %s@%s: %s", pipeline_id, version, err)
                 return None
